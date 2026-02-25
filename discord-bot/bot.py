@@ -3,12 +3,16 @@ from discord.ext import commands
 import uuid
 import io
 import os
-from threading import Thread
+import time
+import threading
+import urllib.request
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
 # ========================================
-# KEEP-ALIVE WEB SERVER (for Render Free)
+# KEEP-ALIVE WEB SERVER + PING PARTNER
 # ========================================
+KEEPALIVE_URL = os.getenv('KEEPALIVE_URL')  # The other Render service URL
+
 class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
@@ -20,7 +24,17 @@ class Handler(BaseHTTPRequestHandler):
 def run_server():
     HTTPServer(("0.0.0.0", 10000), Handler).serve_forever()
 
-Thread(target=run_server, daemon=True).start()
+def ping_partner():
+    while True:
+        try:
+            urllib.request.urlopen(KEEPALIVE_URL)
+            print(f"Pinged keep-alive at {KEEPALIVE_URL}")
+        except:
+            print("Ping to keep-alive failed")
+        time.sleep(300)  # every 5 minutes
+
+threading.Thread(target=run_server, daemon=True).start()
+threading.Thread(target=ping_partner, daemon=True).start()
 
 # ==========================================
 # CONFIGURATION - Set these in Render's
@@ -33,7 +47,7 @@ ADMIN_ROLE_ID = int(os.getenv('ADMIN_ROLE_ID', 0))
 SCOOTER_ID = int(os.getenv('SCOOTER_ID', 0))
 LOG_CHANNEL_ID = int(os.getenv('LOG_CHANNEL_ID', 0))
 
-# Setup intents required for reading DMs and getting server members
+# Setup intents
 intents = discord.Intents.default()
 intents.message_content = True
 intents.members = True
@@ -48,33 +62,27 @@ async def on_ready():
 
 @bot.event
 async def on_message(message):
-    # Don't let the bot reply to itself
     if message.author.bot:
         return
 
-    # Check if the message is a Direct Message
     if isinstance(message.channel, discord.DMChannel):
         guild = bot.get_guild(GUILD_ID)
         if guild is None:
             print("Error: Bot cannot find the specified server. Check GUILD_ID.")
             return
 
-        # Verify the user sending the DM is actually in your server
         member = guild.get_member(message.author.id)
         if member is None:
             await message.channel.send("You must be in the server to open a report.")
             return
 
-        # Generate a short, unique Report ID
         report_id = str(uuid.uuid4())[:6]
         channel_name = f"report-{report_id}"
 
-        # Fetch roles and specific users for permissions
         mod_role = guild.get_role(MOD_ROLE_ID)
         admin_role = guild.get_role(ADMIN_ROLE_ID)
         scooter = guild.get_member(SCOOTER_ID)
 
-        # Define who can see the channel
         overwrites = {
             guild.default_role: discord.PermissionOverwrite(read_messages=False),
             member: discord.PermissionOverwrite(read_messages=True, send_messages=True),
@@ -87,7 +95,6 @@ async def on_message(message):
         if scooter:
             overwrites[scooter] = discord.PermissionOverwrite(read_messages=True, send_messages=True)
 
-        # Create the text channel in the server
         ticket_channel = await guild.create_text_channel(
             name=channel_name,
             overwrites=overwrites,
