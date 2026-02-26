@@ -3,10 +3,11 @@ from discord.ext import commands, tasks
 import uuid
 import io
 import os
+import re
 import aiohttp
 from threading import Thread
 from http.server import HTTPServer, BaseHTTPRequestHandler
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 
 # ========================================
 # KEEP-ALIVE WEB SERVER (for Render Free)
@@ -34,6 +35,7 @@ MOD_ROLE_ID = int(os.getenv('MOD_ROLE_ID', 0))
 ADMIN_ROLE_ID = int(os.getenv('ADMIN_ROLE_ID', 0))
 SCOOTER_ID = int(os.getenv('SCOOTER_ID', 0))
 LOG_CHANNEL_ID = int(os.getenv('LOG_CHANNEL_ID', 0))
+MOD_CHANNEL_ID = int(os.getenv('MOD_CHANNEL_ID', 0))
 YOUTUBE_API_KEY = os.getenv('YOUTUBE_API_KEY', '')
 ANNOUNCEMENT_CHANNEL_ID = int(os.getenv('ANNOUNCEMENT_CHANNEL_ID', 0))
 
@@ -61,6 +63,97 @@ def is_authorized(ctx):
     if any(role.id in (MOD_ROLE_ID, ADMIN_ROLE_ID) for role in ctx.author.roles):
         return True
     return False
+
+
+# ==========================================
+# ADDRESS DETECTION
+# ==========================================
+# Common street suffixes
+STREET_SUFFIXES = (
+    r'(?:street|st|avenue|ave|boulevard|blvd|drive|dr|lane|ln|road|rd|'
+    r'court|ct|circle|cir|place|pl|way|terrace|ter|trail|trl|'
+    r'parkway|pkwy|highway|hwy|loop|run|path|pike|alley|aly)'
+)
+
+# US state abbreviations and full names
+US_STATES = (
+    r'(?:AL|AK|AZ|AR|CA|CO|CT|DE|FL|GA|HI|ID|IL|IN|IA|KS|KY|LA|ME|MD|'
+    r'MA|MI|MN|MS|MO|MT|NE|NV|NH|NJ|NM|NY|NC|ND|OH|OK|OR|PA|RI|SC|SD|'
+    r'TN|TX|UT|VT|VA|WA|WV|WI|WY|'
+    r'Alabama|Alaska|Arizona|Arkansas|California|Colorado|Connecticut|'
+    r'Delaware|Florida|Georgia|Hawaii|Idaho|Illinois|Indiana|Iowa|Kansas|'
+    r'Kentucky|Louisiana|Maine|Maryland|Massachusetts|Michigan|Minnesota|'
+    r'Mississippi|Missouri|Montana|Nebraska|Nevada|New\s?Hampshire|'
+    r'New\s?Jersey|New\s?Mexico|New\s?York|North\s?Carolina|North\s?Dakota|'
+    r'Ohio|Oklahoma|Oregon|Pennsylvania|Rhode\s?Island|South\s?Carolina|'
+    r'South\s?Dakota|Tennessee|Texas|Utah|Vermont|Virginia|Washington|'
+    r'West\s?Virginia|Wisconsin|Wyoming)'
+)
+
+def looks_like_address(text):
+    """
+    Check if the text contains something that looks like a real street address.
+    Returns the matched text if found, or None.
+    """
+    # Normalize text for easier matching
+    check = text.strip()
+
+    # Pattern 1: Street number + street name + suffix
+    # e.g., "123 Main Street" or "4567 Oak Ave"
+    pattern1 = re.compile(
+        r'\b\d{1,6}\s+[\w\s]{1,30}\b' + STREET_SUFFIXES + r'\b',
+        re.IGNORECASE
+    )
+
+    # Pattern 2: City + State + Zip
+    # e.g., "Tampa, FL 32601" or "Los Angeles, California 90001"
+    pattern2 = re.compile(
+        r'\b[A-Z][\w\s]{1,25},?\s*' + US_STATES + r'\s*\d{5}(?:-\d{4})?\b',
+        re.IGNORECASE
+    )
+
+    # Pattern 3: Full address — number + street + city + state
+    # e.g., "123 Main St, Tampa, FL"
+    pattern3 = re.compile(
+        r'\b\d{1,6}\s+[\w\s]{1,30}\b' + STREET_SUFFIXES + r'\b[,.\s]+[A-Z][\w\s]{1,25},?\s*' + US_STATES + r'\b',
+        re.IGNORECASE
+    )
+
+    # Pattern 4: PO Box
+    pattern4 = re.compile(
+        r'\bP\.?\s*O\.?\s*Box\s+\d+\b',
+        re.IGNORECASE
+    )
+
+    # Pattern 5: Apartment/Unit/Suite included
+    # e.g., "123 Main St Apt 4B"
+    pattern5 = re.compile(
+        r'\b\d{1,6}\s+[\w\s]{1,30}\b' + STREET_SUFFIXES + r'\b[,.\s]*(?:apt|apartment|unit|suite|ste|#)\s*\w{1,6}\b',
+        re.IGNORECASE
+    )
+
+    # Check all patterns — require at least TWO patterns to match for confidence,
+    # OR pattern 3 (full address) alone is enough
+    matches = []
+    for pattern in [pattern1, pattern2, pattern3, pattern4, pattern5]:
+        match = pattern.search(check)
+        if match:
+            matches.append(match.group())
+
+    # Full address pattern (pattern3) alone is a strong signal
+    full_match = pattern3.search(check)
+    if full_match:
+        return full_match.group()
+
+    # Two or more pattern hits is suspicious
+    if len(matches) >= 2:
+        return matches[0]
+
+    # Single street address pattern with a zip code nearby
+    if pattern1.search(check) and re.search(r'\b\d{5}(?:-\d{4})?\b', check):
+        return pattern1.search(check).group()
+
+    return None
 
 
 # ==========================================
@@ -168,6 +261,7 @@ async def on_ready():
     if not live_stream_checker.is_running():
         live_stream_checker.start()
     print("YouTube live stream checker started (checks every hour at :05)")
+    print("Address detection active — messages with addresses will be deleted + 12hr timeout")
 
 
 @bot.event
@@ -175,6 +269,57 @@ async def on_message(message):
     if message.author.bot:
         return
 
+    # ---- ADDRESS DETECTION (only in guild channels) ----
+    if message.guild and message.content:
+        # Skip mods/admins/scooter from address detection
+        is_staff = message.author.id == SCOOTER_ID or any(
+            role.id in (MOD_ROLE_ID, ADMIN_ROLE_ID) for role in message.author.roles
+        )
+
+        if not is_staff:
+            detected = looks_like_address(message.content)
+            if detected:
+                # Save info before deleting
+                author = message.author
+                channel = message.channel
+                content = message.content
+
+                # 1. Delete the message immediately
+                try:
+                    await message.delete()
+                except discord.Forbidden:
+                    print(f"Missing permissions to delete message in #{channel.name}")
+
+                # 2. Timeout the user for 12 hours
+                try:
+                    await author.timeout(
+                        timedelta(hours=12),
+                        reason="Posted what appears to be a real address"
+                    )
+                except discord.Forbidden:
+                    print(f"Missing permissions to timeout {author.name}")
+
+                # 3. Alert the mod channel
+                mod_channel = bot.get_channel(MOD_CHANNEL_ID)
+                if mod_channel:
+                    embed = discord.Embed(
+                        title="🚨 Address Detected & Removed",
+                        color=discord.Color.red(),
+                        timestamp=datetime.now(timezone.utc)
+                    )
+                    embed.add_field(name="User", value=f"{author.mention} ({author.name})", inline=True)
+                    embed.add_field(name="Channel", value=f"#{channel.name}", inline=True)
+                    embed.add_field(name="Action Taken", value="Message deleted + 12hr timeout", inline=True)
+                    embed.add_field(name="Detected Pattern", value=f"||{detected}||", inline=False)
+                    embed.add_field(name="Full Message", value=f"||{content[:500]}||", inline=False)
+                    embed.set_footer(text="Address content hidden in spoiler tags for safety")
+
+                    await mod_channel.send(embed=embed)
+
+                # Don't process commands for deleted messages
+                return
+
+    # ---- DM REPORT SYSTEM ----
     if isinstance(message.channel, discord.DMChannel):
         guild = bot.get_guild(GUILD_ID)
         if guild is None:
@@ -263,7 +408,7 @@ async def offline(ctx):
         return
 
     await bot.change_presence(status=discord.Status.invisible)
-    await ctx.send("Bot is now in **offline** mode. (Still running, just invisible)")
+    await ctx.send("Bot is now in **offline** mode. (Powering down any issues contact Admin/Mods)")
 
 
 @bot.command()
