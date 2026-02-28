@@ -305,10 +305,15 @@ async def live_stream_checker():
             # LIVE NOW goes to ANNOUNCEMENT channel with @everyone
             channel = bot.get_channel(ANNOUNCEMENT_CHANNEL_ID)
             if channel:
-                await channel.send(
+                live_msg = await channel.send(
                     f"@everyone 🔴 **Scooter is LIVE NOW!**\n\n"
                     f"**{stream['title']}**\n{stream['url']}"
                 )
+                # Publish to followers
+                try:
+                    await live_msg.publish()
+                except Exception:
+                    pass
         elif not stream:
             already_announced_stream_id = None
 
@@ -333,8 +338,12 @@ async def live_stream_checker():
 
                         live_stream_checker._last_announce = announce_key
 
-                        # Countdowns go to MAIN CHAT, no @everyone
-                        channel = bot.get_channel(MAIN_CHAT_CHANNEL_ID)
+                        # 2hr notice goes to ANNOUNCEMENT channel, rest go to MAIN CHAT
+                        if mark == 120:
+                            channel = bot.get_channel(ANNOUNCEMENT_CHANNEL_ID)
+                        else:
+                            channel = bot.get_channel(MAIN_CHAT_CHANNEL_ID)
+
                         if channel:
                             if mark >= 60:
                                 time_label = f"{mark // 60} hour{'s' if mark >= 120 else ''}"
@@ -363,7 +372,14 @@ async def live_stream_checker():
                             )
                             embed.add_field(name="Link", value=upcoming['url'], inline=False)
 
-                            await channel.send(embed=embed)
+                            sent_msg = await channel.send(embed=embed)
+
+                            # Publish the 2hr notice to followers
+                            if mark == 120:
+                                try:
+                                    await sent_msg.publish()
+                                except Exception:
+                                    pass
                         break
         except (ValueError, TypeError):
             pass
