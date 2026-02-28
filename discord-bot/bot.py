@@ -9,6 +9,13 @@ from threading import Thread
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from datetime import datetime, timezone, timedelta
 
+# EST timezone (UTC-5)
+EST = timezone(timedelta(hours=-5))
+# Central timezone (UTC-6)
+CST = timezone(timedelta(hours=-6))
+# CST timezone (UTC-6)
+CST = timezone(timedelta(hours=-6))
+
 # ========================================
 # KEEP-ALIVE WEB SERVER
 # ========================================
@@ -351,7 +358,7 @@ async def live_stream_checker():
                             embed.add_field(name="Stream", value=upcoming['title'], inline=False)
                             embed.add_field(
                                 name="Starts At",
-                                value=scheduled_dt.strftime("%I:%M %p UTC"),
+                                value=f"{scheduled_dt.astimezone(EST).strftime('%I:%M %p')} EST / {scheduled_dt.astimezone(CST).strftime('%I:%M %p')} CT",
                                 inline=True
                             )
                             embed.add_field(name="Link", value=upcoming['url'], inline=False)
@@ -596,9 +603,11 @@ async def close(ctx):
 
         # Build transcript
         transcript = f"--- Transcript for {ctx.channel.name} ---\n"
-        transcript += f"--- Closed by {ctx.author.name} at {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')} UTC ---\n\n"
+        transcript += f"--- Closed by {ctx.author.name} at {datetime.now(EST).strftime('%Y-%m-%d %H:%M:%S')} EST / {datetime.now(CST).strftime('%H:%M:%S')} CT ---\n\n"
         async for msg in ctx.channel.history(limit=None, oldest_first=True):
-            time_formatted = msg.created_at.strftime("%Y-%m-%d %H:%M:%S")
+            est_time = msg.created_at.replace(tzinfo=timezone.utc).astimezone(EST).strftime("%Y-%m-%d %H:%M:%S")
+            cst_time = msg.created_at.replace(tzinfo=timezone.utc).astimezone(CST).strftime("%H:%M:%S")
+            time_formatted = f"{est_time} EST / {cst_time} CT"
             content = msg.content if msg.content else "[embed or attachment]"
             transcript += f"[{time_formatted}] {msg.author.name}: {content}\n"
 
@@ -640,7 +649,7 @@ async def checklive(ctx):
         # Format the scheduled time nicely
         try:
             scheduled_dt = datetime.fromisoformat(upcoming['scheduled_time'].replace('Z', '+00:00'))
-            time_str = scheduled_dt.strftime("%B %d, %Y at %I:%M %p UTC")
+            time_str = f"{scheduled_dt.astimezone(EST).strftime('%B %d, %Y at %I:%M %p')} EST / {scheduled_dt.astimezone(CST).strftime('%I:%M %p')} CT"
             # Calculate how long until the stream
             now = datetime.now(timezone.utc)
             diff = scheduled_dt - now
