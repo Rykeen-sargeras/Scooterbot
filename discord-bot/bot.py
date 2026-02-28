@@ -66,21 +66,33 @@ def is_authorized(ctx):
 
 
 # ==========================================
-# ADDRESS DETECTION
+# ADDRESS DETECTION (strict — requires multiple
+# address components to avoid false positives)
 # ==========================================
-# Common street suffixes
+
+# ==========================================
+# ADDRESS DETECTION (STRICT MODE)
+# Only triggers on patterns that are almost
+# certainly real addresses. Requires a house
+# number + street + city/state or zip code.
+# ==========================================
+
+# Street suffixes — only full words, no abbreviations alone
 STREET_SUFFIXES = (
-    r'(?:street|st|avenue|ave|boulevard|blvd|drive|dr|lane|ln|road|rd|'
-    r'court|ct|circle|cir|place|pl|way|terrace|ter|trail|trl|'
-    r'parkway|pkwy|highway|hwy|loop|run|path|pike|alley|aly)'
+    r'(?:street|avenue|boulevard|drive|lane|road|'
+    r'court|circle|place|terrace|trail|'
+    r'parkway|highway|loop|pike|alley)'
 )
 
-# US state abbreviations and full names
-US_STATES = (
+# US state abbreviations (2-letter)
+US_STATES_ABBREV = (
     r'(?:AL|AK|AZ|AR|CA|CO|CT|DE|FL|GA|HI|ID|IL|IN|IA|KS|KY|LA|ME|MD|'
     r'MA|MI|MN|MS|MO|MT|NE|NV|NH|NJ|NM|NY|NC|ND|OH|OK|OR|PA|RI|SC|SD|'
-    r'TN|TX|UT|VT|VA|WA|WV|WI|WY|'
-    r'Alabama|Alaska|Arizona|Arkansas|California|Colorado|Connecticut|'
+    r'TN|TX|UT|VT|VA|WA|WV|WI|WY)'
+)
+
+US_STATES_FULL = (
+    r'(?:Alabama|Alaska|Arizona|Arkansas|California|Colorado|Connecticut|'
     r'Delaware|Florida|Georgia|Hawaii|Idaho|Illinois|Indiana|Iowa|Kansas|'
     r'Kentucky|Louisiana|Maine|Maryland|Massachusetts|Michigan|Minnesota|'
     r'Mississippi|Missouri|Montana|Nebraska|Nevada|New\s?Hampshire|'
@@ -90,69 +102,59 @@ US_STATES = (
     r'West\s?Virginia|Wisconsin|Wyoming)'
 )
 
+
 def looks_like_address(text):
     """
-    Check if the text contains something that looks like a real street address.
-    Returns the matched text if found, or None.
+    VERY strictly detect real street addresses.
+    Only flags messages that have ALL of these together:
+      - A house/building number (1-6 digits)
+      - A street name + street suffix (Street, Ave, Blvd, etc.)
+      - PLUS a city + state OR a 5-digit zip code nearby
+
+    This means casual mentions of "drive", "court", "lane", etc.
+    will NEVER trigger on their own.
     """
-    # Normalize text for easier matching
     check = text.strip()
 
-    # Pattern 1: Street number + street name + suffix
-    # e.g., "123 Main Street" or "4567 Oak Ave"
-    pattern1 = re.compile(
-        r'\b\d{1,6}\s+[\w\s]{1,30}\b' + STREET_SUFFIXES + r'\b',
+    # Pattern A: Full address — number + street + city + state (+ optional zip)
+    # e.g., "123 Main Street, Tampa, FL 32601" or "456 Oak Drive, Miami, Florida"
+    full_address = re.compile(
+        r'\b\d{1,6}\s+[A-Za-z]{2,20}(?:\s[A-Za-z]{2,20})?\s+'
+        + STREET_SUFFIXES +
+        r'\b[,.\s]+[A-Z][a-z]+(?:\s[A-Z][a-z]+)?[,.\s]+(?:' + US_STATES_ABBREV + r'|' + US_STATES_FULL + r')'
+        r'(?:\s+\d{5}(?:-\d{4})?)?\b',
         re.IGNORECASE
     )
 
-    # Pattern 2: City + State + Zip
-    # e.g., "Tampa, FL 32601" or "Los Angeles, California 90001"
-    pattern2 = re.compile(
-        r'\b[A-Z][\w\s]{1,25},?\s*' + US_STATES + r'\s*\d{5}(?:-\d{4})?\b',
+    match = full_address.search(check)
+    if match:
+        return match.group()
+
+    # Pattern B: Number + street + zip code
+    # e.g., "123 Oak Avenue 32601"
+    street_plus_zip = re.compile(
+        r'\b\d{1,6}\s+[A-Za-z]{2,20}(?:\s[A-Za-z]{2,20})?\s+'
+        + STREET_SUFFIXES +
+        r'\b[,.\s]*\d{5}(?:-\d{4})?\b',
         re.IGNORECASE
     )
 
-    # Pattern 3: Full address — number + street + city + state
-    # e.g., "123 Main St, Tampa, FL"
-    pattern3 = re.compile(
-        r'\b\d{1,6}\s+[\w\s]{1,30}\b' + STREET_SUFFIXES + r'\b[,.\s]+[A-Z][\w\s]{1,25},?\s*' + US_STATES + r'\b',
+    match = street_plus_zip.search(check)
+    if match:
+        return match.group()
+
+    # Pattern C: PO Box + city/state or zip
+    po_box = re.compile(
+        r'\bP\.?\s*O\.?\s*Box\s+\d+[,.\s]+[A-Z][a-z]+(?:\s[A-Z][a-z]+)?[,.\s]+(?:' + US_STATES_ABBREV + r'|' + US_STATES_FULL + r')'
+        r'(?:\s+\d{5}(?:-\d{4})?)?\b',
         re.IGNORECASE
     )
 
-    # Pattern 4: PO Box
-    pattern4 = re.compile(
-        r'\bP\.?\s*O\.?\s*Box\s+\d+\b',
-        re.IGNORECASE
-    )
+    match = po_box.search(check)
+    if match:
+        return match.group()
 
-    # Pattern 5: Apartment/Unit/Suite included
-    # e.g., "123 Main St Apt 4B"
-    pattern5 = re.compile(
-        r'\b\d{1,6}\s+[\w\s]{1,30}\b' + STREET_SUFFIXES + r'\b[,.\s]*(?:apt|apartment|unit|suite|ste|#)\s*\w{1,6}\b',
-        re.IGNORECASE
-    )
-
-    # Check all patterns — require at least TWO patterns to match for confidence,
-    # OR pattern 3 (full address) alone is enough
-    matches = []
-    for pattern in [pattern1, pattern2, pattern3, pattern4, pattern5]:
-        match = pattern.search(check)
-        if match:
-            matches.append(match.group())
-
-    # Full address pattern (pattern3) alone is a strong signal
-    full_match = pattern3.search(check)
-    if full_match:
-        return full_match.group()
-
-    # Two or more pattern hits is suspicious
-    if len(matches) >= 2:
-        return matches[0]
-
-    # Single street address pattern with a zip code nearby
-    if pattern1.search(check) and re.search(r'\b\d{5}(?:-\d{4})?\b', check):
-        return pattern1.search(check).group()
-
+    # No confident match found
     return None
 
 
