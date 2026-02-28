@@ -4,6 +4,7 @@ import uuid
 import io
 import os
 import re
+import json
 import aiohttp
 from threading import Thread
 from http.server import HTTPServer, BaseHTTPRequestHandler
@@ -39,11 +40,29 @@ MOD_CHANNEL_ID = int(os.getenv('MOD_CHANNEL_ID', 0))
 YOUTUBE_API_KEY = os.getenv('YOUTUBE_API_KEY', '')
 ANNOUNCEMENT_CHANNEL_ID = int(os.getenv('ANNOUNCEMENT_CHANNEL_ID', 0))
 
-# Scooter's YouTube Channel ID (from https://www.youtube.com/@Scooter-13)
-YOUTUBE_CHANNEL_ID = 'UCxxxxxxxxxxxxxxxxxxxxxxxx'  # Will be resolved automatically
+# Scooter's YouTube Channel ID
+YOUTUBE_CHANNEL_ID = 'UCxxxxxxxxxxxxxxxxxxxxxxxx'
 
-# Track whether we already announced the current stream
+# Track state
 already_announced_stream_id = None
+ticket_counter = 0  # Will be loaded/saved
+dm_sessions = {}    # Tracks ongoing DM report conversations
+
+# File to persist ticket counter
+TICKET_COUNTER_FILE = '/tmp/ticket_counter.json'
+
+def load_ticket_counter():
+    global ticket_counter
+    try:
+        with open(TICKET_COUNTER_FILE, 'r') as f:
+            data = json.load(f)
+            ticket_counter = data.get('counter', 0)
+    except (FileNotFoundError, json.JSONDecodeError):
+        ticket_counter = 0
+
+def save_ticket_counter():
+    with open(TICKET_COUNTER_FILE, 'w') as f:
+        json.dump({'counter': ticket_counter}, f)
 
 # Setup intents
 intents = discord.Intents.default()
@@ -70,21 +89,33 @@ def is_authorized(ctx):
 # address components to avoid false positives)
 # ==========================================
 
-# ==========================================
-# ADDRESS DETECTION (STRICT MODE)
-# Only triggers on patterns that are almost
-# certainly real addresses. Requires a house
-# number + street + city/state or zip code.
-# ==========================================
+# Words that look like street suffixes but aren't addresses
+FALSE_POSITIVE_PHRASES = [
+    'hard drive', 'flash drive', 'thumb drive', 'pen drive', 'usb drive',
+    'google drive', 'disk drive', 'solid state drive', 'ssd drive',
+    'test drive', 'drive through', 'drive thru', 'sex drive',
+    'main street journal', 'wall street', 'sesame street',
+    'road trip', 'road map', 'roadmap', 'road test', 'road block',
+    'trail mix', 'trail run', 'paper trail', 'hiking trail',
+    'round trip', 'place holder', 'placeholder', 'first place',
+    'second place', 'third place', 'market place', 'marketplace',
+    'take place', 'work place', 'workplace',
+    'court case', 'court order', 'court date', 'basketball court',
+    'tennis court', 'food court', 'court martial',
+    'lane change', 'fast lane', 'bowling lane', 'swim lane',
+    'circuit board', 'short circuit',
+    'avenue q',
+    'terra byte drive', 'terabyte drive', 'byte drive', 'media station',
+]
 
-# Street suffixes — only full words, no abbreviations alone
 STREET_SUFFIXES = (
-    r'(?:street|avenue|boulevard|drive|lane|road|'
+    r'(?:street|avenue|boulevard|blvd|drive|lane|road|'
     r'court|circle|place|terrace|trail|'
-    r'parkway|highway|loop|pike|alley)'
+    r'parkway|pkwy|highway|hwy|loop|pike|alley)'
 )
 
-# US state abbreviations (2-letter)
+STREET_ABBREVS = r'(?:st\.?|ave\.?|dr\.?|ln\.?|rd\.?|ct\.?|cir\.?|pl\.?|ter\.?|trl\.?|aly\.?)'
+
 US_STATES_ABBREV = (
     r'(?:AL|AK|AZ|AR|CA|CO|CT|DE|FL|GA|HI|ID|IL|IN|IA|KS|KY|LA|ME|MD|'
     r'MA|MI|MN|MS|MO|MT|NE|NV|NH|NJ|NM|NY|NC|ND|OH|OK|OR|PA|RI|SC|SD|'
@@ -103,47 +134,48 @@ US_STATES_FULL = (
 )
 
 
-def looks_like_address(text):
-    """
-    VERY strictly detect real street addresses.
-    Only flags messages that have ALL of these together:
-      - A house/building number (1-6 digits)
-      - A street name + street suffix (Street, Ave, Blvd, etc.)
-      - PLUS a city + state OR a 5-digit zip code nearby
+def has_false_positive(text):
+    lower = text.lower()
+    return any(phrase in lower for phrase in FALSE_POSITIVE_PHRASES)
 
-    This means casual mentions of "drive", "court", "lane", etc.
-    will NEVER trigger on their own.
-    """
+
+def looks_like_address(text):
     check = text.strip()
 
-    # Pattern A: Full address — number + street + city + state (+ optional zip)
-    # e.g., "123 Main Street, Tampa, FL 32601" or "456 Oak Drive, Miami, Florida"
+    if has_false_positive(check):
+        return None
+
     full_address = re.compile(
-        r'\b\d{1,6}\s+[A-Za-z]{2,20}(?:\s[A-Za-z]{2,20})?\s+'
-        + STREET_SUFFIXES +
+        r'\b\d{1,6}\s+[A-Za-z\s]{2,25}\b(?:' + STREET_SUFFIXES + r'|' + STREET_ABBREVS + r')'
         r'\b[,.\s]+[A-Z][a-z]+(?:\s[A-Z][a-z]+)?[,.\s]+(?:' + US_STATES_ABBREV + r'|' + US_STATES_FULL + r')'
         r'(?:\s+\d{5}(?:-\d{4})?)?\b',
         re.IGNORECASE
     )
 
     match = full_address.search(check)
-    if match:
+    if match and not has_false_positive(match.group()):
         return match.group()
 
-    # Pattern B: Number + street + zip code
-    # e.g., "123 Oak Avenue 32601"
     street_plus_zip = re.compile(
-        r'\b\d{1,6}\s+[A-Za-z]{2,20}(?:\s[A-Za-z]{2,20})?\s+'
-        + STREET_SUFFIXES +
+        r'\b\d{1,6}\s+[A-Za-z\s]{2,25}\b(?:' + STREET_SUFFIXES + r'|' + STREET_ABBREVS + r')'
         r'\b[,.\s]*\d{5}(?:-\d{4})?\b',
         re.IGNORECASE
     )
 
     match = street_plus_zip.search(check)
-    if match:
+    if match and not has_false_positive(match.group()):
         return match.group()
 
-    # Pattern C: PO Box + city/state or zip
+    street_plus_unit = re.compile(
+        r'\b\d{1,6}\s+[A-Za-z\s]{2,25}\b(?:' + STREET_SUFFIXES + r'|' + STREET_ABBREVS + r')'
+        r'\b[,.\s]*(?:apt|apartment|unit|suite|ste|#)\s*\w{1,6}\b',
+        re.IGNORECASE
+    )
+
+    match = street_plus_unit.search(check)
+    if match and not has_false_positive(match.group()):
+        return match.group()
+
     po_box = re.compile(
         r'\bP\.?\s*O\.?\s*Box\s+\d+[,.\s]+[A-Z][a-z]+(?:\s[A-Z][a-z]+)?[,.\s]+(?:' + US_STATES_ABBREV + r'|' + US_STATES_FULL + r')'
         r'(?:\s+\d{5}(?:-\d{4})?)?\b',
@@ -154,7 +186,6 @@ def looks_like_address(text):
     if match:
         return match.group()
 
-    # No confident match found
     return None
 
 
@@ -162,7 +193,6 @@ def looks_like_address(text):
 # YOUTUBE LIVE STREAM CHECKER
 # ==========================================
 async def get_youtube_channel_id():
-    """Resolve the @Scooter-13 handle to a YouTube Channel ID."""
     url = "https://www.googleapis.com/youtube/v3/search"
     params = {
         'part': 'snippet',
@@ -180,21 +210,16 @@ async def get_youtube_channel_id():
 
 
 async def check_live_stream():
-    """Check if Scooter is currently live on YouTube."""
     global YOUTUBE_CHANNEL_ID
 
     if not YOUTUBE_API_KEY:
-        print("No YouTube API key set, skipping live check.")
         return None
 
-    # Resolve channel ID on first run
     if YOUTUBE_CHANNEL_ID.startswith('UCx'):
         resolved = await get_youtube_channel_id()
         if resolved:
             YOUTUBE_CHANNEL_ID = resolved
-            print(f"Resolved YouTube Channel ID: {YOUTUBE_CHANNEL_ID}")
         else:
-            print("Could not resolve YouTube channel ID.")
             return None
 
     url = "https://www.googleapis.com/youtube/v3/search"
@@ -221,14 +246,11 @@ async def check_live_stream():
 
 @tasks.loop(minutes=1)
 async def live_stream_checker():
-    """Runs every minute but only acts at :05 past the hour."""
     global already_announced_stream_id
 
     now = datetime.now(timezone.utc)
     if now.minute != 5:
         return
-
-    print(f"[{now.strftime('%H:%M')}] Checking for live stream...")
 
     stream = await check_live_stream()
 
@@ -242,9 +264,6 @@ async def live_stream_checker():
                 f"**{stream['title']}**\n"
                 f"{stream['url']}"
             )
-            print(f"Announced live stream: {stream['title']}")
-        else:
-            print("Error: Could not find announcement channel.")
     elif not stream:
         already_announced_stream_id = None
 
@@ -259,21 +278,23 @@ async def before_live_check():
 # ==========================================
 @bot.event
 async def on_ready():
+    load_ticket_counter()
     print(f'Logged in as {bot.user.name} and ready to accept reports!')
+    print(f'Current ticket counter: {ticket_counter}')
     if not live_stream_checker.is_running():
         live_stream_checker.start()
     print("YouTube live stream checker started (checks every hour at :05)")
-    print("Address detection active — messages with addresses will be deleted + 12hr timeout")
 
 
 @bot.event
 async def on_message(message):
+    global ticket_counter
+
     if message.author.bot:
         return
 
     # ---- ADDRESS DETECTION (only in guild channels) ----
     if message.guild and message.content:
-        # Skip mods/admins/scooter from address detection
         is_staff = message.author.id == SCOOTER_ID or any(
             role.id in (MOD_ROLE_ID, ADMIN_ROLE_ID) for role in message.author.roles
         )
@@ -281,27 +302,23 @@ async def on_message(message):
         if not is_staff:
             detected = looks_like_address(message.content)
             if detected:
-                # Save info before deleting
                 author = message.author
                 channel = message.channel
                 content = message.content
 
-                # 1. Delete the message immediately
                 try:
                     await message.delete()
                 except discord.Forbidden:
-                    print(f"Missing permissions to delete message in #{channel.name}")
+                    pass
 
-                # 2. Timeout the user for 12 hours
                 try:
                     await author.timeout(
                         timedelta(hours=12),
                         reason="Posted what appears to be a real address"
                     )
                 except discord.Forbidden:
-                    print(f"Missing permissions to timeout {author.name}")
+                    pass
 
-                # 3. Alert the mod channel
                 mod_channel = bot.get_channel(MOD_CHANNEL_ID)
                 if mod_channel:
                     embed = discord.Embed(
@@ -318,14 +335,12 @@ async def on_message(message):
 
                     await mod_channel.send(embed=embed)
 
-                # Don't process commands for deleted messages
                 return
 
-    # ---- DM REPORT SYSTEM ----
+    # ---- DM REPORT SYSTEM (guided flow) ----
     if isinstance(message.channel, discord.DMChannel):
         guild = bot.get_guild(GUILD_ID)
         if guild is None:
-            print("Error: Bot cannot find the specified server. Check GUILD_ID.")
             return
 
         member = guild.get_member(message.author.id)
@@ -333,33 +348,150 @@ async def on_message(message):
             await message.channel.send("You must be in the server to open a report.")
             return
 
-        report_id = str(uuid.uuid4())[:6]
-        channel_name = f"report-{report_id}"
+        user_id = message.author.id
 
-        mod_role = guild.get_role(MOD_ROLE_ID)
-        admin_role = guild.get_role(ADMIN_ROLE_ID)
-        scooter = guild.get_member(SCOOTER_ID)
+        # Check if user has an active DM session
+        if user_id in dm_sessions:
+            session = dm_sessions[user_id]
+            step = session['step']
 
-        overwrites = {
-            guild.default_role: discord.PermissionOverwrite(read_messages=False),
-            member: discord.PermissionOverwrite(read_messages=True, send_messages=True),
-        }
+            # Cancel at any time
+            if message.content.lower() == 'cancel':
+                del dm_sessions[user_id]
+                await message.channel.send("❌ Report cancelled. Send any message to start a new one.")
+                return
 
-        if mod_role:
-            overwrites[mod_role] = discord.PermissionOverwrite(read_messages=True, send_messages=True)
-        if admin_role:
-            overwrites[admin_role] = discord.PermissionOverwrite(read_messages=True, send_messages=True)
-        if scooter:
-            overwrites[scooter] = discord.PermissionOverwrite(read_messages=True, send_messages=True)
+            if step == 'awaiting_username':
+                session['reported_user'] = message.content
+                session['step'] = 'awaiting_offense'
+                await message.add_reaction('✅')
+                await message.channel.send(
+                    "✅ Got it.\n\n"
+                    "**Step 2/3 — What did they do?**\n"
+                    "Describe the offense or rule they broke."
+                )
 
-        ticket_channel = await guild.create_text_channel(
-            name=channel_name,
-            overwrites=overwrites,
-            reason=f"Report created by {message.author.name}"
-        )
+            elif step == 'awaiting_offense':
+                session['offense'] = message.content
+                session['step'] = 'awaiting_proof'
+                await message.add_reaction('✅')
+                await message.channel.send(
+                    "✅ Got it.\n\n"
+                    "**Step 3/3 — Do you have proof?**\n"
+                    "Send a screenshot, link, or description.\n"
+                    "Type `none` if you don't have any."
+                )
 
-        await ticket_channel.send(f"**New Report** from {member.mention}\n**Reason:** {message.content}")
-        await message.channel.send(f"Your report has been received! A private ticket has been opened in the server: {ticket_channel.mention}")
+            elif step == 'awaiting_proof':
+                # Collect proof (text and/or attachments)
+                proof_text = message.content if message.content.lower() != 'none' else 'No proof provided'
+                proof_images = [att.url for att in message.attachments] if message.attachments else []
+                session['proof'] = proof_text
+                session['proof_images'] = proof_images
+
+                await message.add_reaction('✅')
+                await message.channel.send("✅ All info received. **Creating ticket now...**")
+
+                # --- CREATE THE TICKET ---
+                ticket_counter += 1
+                save_ticket_counter()
+
+                ticket_number = f"{ticket_counter:04d}"
+                channel_name = f"ticket-{ticket_number}"
+
+                mod_role = guild.get_role(MOD_ROLE_ID)
+                admin_role = guild.get_role(ADMIN_ROLE_ID)
+                scooter = guild.get_member(SCOOTER_ID)
+
+                overwrites = {
+                    guild.default_role: discord.PermissionOverwrite(read_messages=False),
+                    member: discord.PermissionOverwrite(read_messages=True, send_messages=True),
+                }
+
+                if mod_role:
+                    overwrites[mod_role] = discord.PermissionOverwrite(read_messages=True, send_messages=True)
+                if admin_role:
+                    overwrites[admin_role] = discord.PermissionOverwrite(read_messages=True, send_messages=True)
+                if scooter:
+                    overwrites[scooter] = discord.PermissionOverwrite(read_messages=True, send_messages=True)
+
+                ticket_channel = await guild.create_text_channel(
+                    name=channel_name,
+                    overwrites=overwrites,
+                    reason=f"Report ticket by {message.author.name}"
+                )
+
+                # Build the report embed
+                embed = discord.Embed(
+                    title=f"📋 Ticket-{ticket_number}",
+                    color=discord.Color.blue(),
+                    timestamp=datetime.now(timezone.utc)
+                )
+                embed.set_author(
+                    name=f"Report by {member.display_name}",
+                    icon_url=member.avatar.url if member.avatar else member.default_avatar.url
+                )
+                embed.add_field(
+                    name="👤 Reported User",
+                    value=session['reported_user'],
+                    inline=True
+                )
+                embed.add_field(
+                    name="📌 Status",
+                    value="🟡 Open",
+                    inline=True
+                )
+                embed.add_field(
+                    name="⚠️ Offense",
+                    value=session['offense'],
+                    inline=False
+                )
+                embed.add_field(
+                    name="🔗 Proof",
+                    value=proof_text,
+                    inline=False
+                )
+                embed.set_footer(text=f"Ticket opened by {member.name} • ID: {member.id}")
+
+                await ticket_channel.send(embed=embed)
+
+                # Send proof images if any
+                if proof_images:
+                    for img_url in proof_images:
+                        await ticket_channel.send(f"📎 **Attached proof:** {img_url}")
+
+                # Notify the reporter
+                await message.channel.send(
+                    f"🎫 **Ticket-{ticket_number}** has been created!\n"
+                    f"You can follow up in {ticket_channel.mention}\n"
+                    f"A moderator will review your report shortly."
+                )
+
+                # Clean up the session
+                del dm_sessions[user_id]
+
+            return  # Don't process commands during DM flow
+
+        else:
+            # No active session — start a new one
+            dm_sessions[user_id] = {
+                'step': 'awaiting_username',
+                'reported_user': None,
+                'offense': None,
+                'proof': None,
+                'proof_images': [],
+            }
+
+            await message.channel.send(
+                "📨 **ScooterBot Report System**\n\n"
+                "I'll walk you through filing a report.\n"
+                "You can type `cancel` at any time to stop.\n\n"
+                "**Step 1/3 — Who are you reporting?**\n"
+                "Enter the username or display name of the user."
+            )
+
+            # Check if they typed "cancel"
+            return
 
     await bot.process_commands(message)
 
@@ -369,7 +501,7 @@ async def on_message(message):
 # ==========================================
 @bot.command()
 async def close(ctx):
-    if ctx.channel.name.startswith("report-"):
+    if ctx.channel.name.startswith("ticket-"):
         await ctx.send("Archiving ticket and closing channel...")
 
         transcript = f"--- Transcript for {ctx.channel.name} ---\n\n"
@@ -388,12 +520,11 @@ async def close(ctx):
 
         await ctx.channel.delete(reason=f"Ticket closed by {ctx.author.name}")
     else:
-        await ctx.send("This command can only be used inside a report ticket channel.")
+        await ctx.send("This command can only be used inside a ticket channel.")
 
 
 @bot.command()
 async def checklive(ctx):
-    """Manually check if Scooter is live right now."""
     await ctx.send("Checking YouTube...")
     stream = await check_live_stream()
     if stream:
@@ -404,7 +535,6 @@ async def checklive(ctx):
 
 @bot.command()
 async def offline(ctx):
-    """Set the bot to invisible (appear offline). Restricted to Mods/Admins/Scooter."""
     if not is_authorized(ctx):
         await ctx.send("You don't have permission to use this command.")
         return
@@ -415,7 +545,6 @@ async def offline(ctx):
 
 @bot.command()
 async def online(ctx):
-    """Set the bot back to online. Restricted to Mods/Admins/Scooter."""
     if not is_authorized(ctx):
         await ctx.send("You don't have permission to use this command.")
         return
