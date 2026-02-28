@@ -37,6 +37,7 @@ LOG_CHANNEL_ID = int(os.getenv('LOG_CHANNEL_ID', 0))
 MOD_CHANNEL_ID = int(os.getenv('MOD_CHANNEL_ID', 0))
 YOUTUBE_API_KEY = os.getenv('YOUTUBE_API_KEY', '')
 ANNOUNCEMENT_CHANNEL_ID = int(os.getenv('ANNOUNCEMENT_CHANNEL_ID', 0))
+MAIN_CHAT_CHANNEL_ID = int(os.getenv('MAIN_CHAT_CHANNEL_ID', 0))
 
 YOUTUBE_CHANNEL_ID = 'UCxxxxxxxxxxxxxxxxxxxxxxxx'
 already_announced_stream_id = None
@@ -289,11 +290,12 @@ async def live_stream_checker():
 
     now = datetime.now(timezone.utc)
 
-    # Check for LIVE streams at :01 and :05
-    if now.minute in (1, 5):
+    # Check for LIVE streams every hour at :05
+    if now.minute == 5:
         stream = await check_live_stream()
         if stream and stream['video_id'] != already_announced_stream_id:
             already_announced_stream_id = stream['video_id']
+            # LIVE NOW goes to ANNOUNCEMENT channel with @everyone
             channel = bot.get_channel(ANNOUNCEMENT_CHANNEL_ID)
             if channel:
                 await channel.send(
@@ -303,7 +305,7 @@ async def live_stream_checker():
         elif not stream:
             already_announced_stream_id = None
 
-    # Check for UPCOMING streams every minute (announces at 2hr, 1.5hr, 1hr, 30min, 0min)
+    # Check for UPCOMING streams every minute (announces at 2hr, 1.5hr, 1hr, 30min, 5min)
     upcoming = await check_upcoming_stream()
     if upcoming and upcoming.get('scheduled_time'):
         try:
@@ -324,7 +326,8 @@ async def live_stream_checker():
 
                         live_stream_checker._last_announce = announce_key
 
-                        channel = bot.get_channel(ANNOUNCEMENT_CHANNEL_ID)
+                        # Countdowns go to MAIN CHAT, no @everyone
+                        channel = bot.get_channel(MAIN_CHAT_CHANNEL_ID)
                         if channel:
                             if mark >= 60:
                                 time_label = f"{mark // 60} hour{'s' if mark >= 120 else ''}"
@@ -332,7 +335,6 @@ async def live_stream_checker():
                                 time_label = f"{mark} minutes"
 
                             if mark == 5:
-                                time_label = "5 minutes"
                                 hype = "⏰🔥"
                             elif mark == 30:
                                 hype = "⏰"
@@ -354,7 +356,7 @@ async def live_stream_checker():
                             )
                             embed.add_field(name="Link", value=upcoming['url'], inline=False)
 
-                            await channel.send(f"@everyone", embed=embed)
+                            await channel.send(embed=embed)
                         break
         except (ValueError, TypeError):
             pass
