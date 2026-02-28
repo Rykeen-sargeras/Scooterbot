@@ -237,24 +237,127 @@ async def check_live_stream():
     return None
 
 
+async def check_upcoming_stream():
+    """Check if Scooter has a scheduled upcoming live stream."""
+    global YOUTUBE_CHANNEL_ID
+    if not YOUTUBE_API_KEY:
+        return None
+    if YOUTUBE_CHANNEL_ID.startswith('UCx'):
+        resolved = await get_youtube_channel_id()
+        if resolved:
+            YOUTUBE_CHANNEL_ID = resolved
+        else:
+            return None
+
+    url = "https://www.googleapis.com/youtube/v3/search"
+    params = {
+        'part': 'snippet', 'channelId': YOUTUBE_CHANNEL_ID,
+        'eventType': 'upcoming', 'type': 'video', 'key': YOUTUBE_API_KEY
+    }
+    async with aiohttp.ClientSession() as session:
+        async with session.get(url, params=params) as resp:
+            if resp.status == 200:
+                data = await resp.json()
+                if data.get('items'):
+                    video = data['items'][0]
+                    video_id = video['id']['videoId']
+
+                    details_url = "https://www.googleapis.com/youtube/v3/videos"
+                    details_params = {
+                        'part': 'liveStreamingDetails,snippet',
+                        'id': video_id,
+                        'key': YOUTUBE_API_KEY
+                    }
+                    async with session.get(details_url, params=details_params) as details_resp:
+                        if details_resp.status == 200:
+                            details_data = await details_resp.json()
+                            if details_data.get('items'):
+                                item = details_data['items'][0]
+                                scheduled_time = item.get('liveStreamingDetails', {}).get('scheduledStartTime', 'Unknown')
+                                return {
+                                    'video_id': video_id,
+                                    'title': video['snippet']['title'],
+                                    'url': f"https://www.youtube.com/watch?v={video_id}",
+                                    'scheduled_time': scheduled_time
+                                }
+    return None
+
+
 @tasks.loop(minutes=1)
 async def live_stream_checker():
     global already_announced_stream_id
-    now = datetime.now(timezone.utc)
-    if now.minute != 5:
-        return
 
-    stream = await check_live_stream()
-    if stream and stream['video_id'] != already_announced_stream_id:
-        already_announced_stream_id = stream['video_id']
-        channel = bot.get_channel(ANNOUNCEMENT_CHANNEL_ID)
-        if channel:
-            await channel.send(
-                f"@everyone 🔴 **Scooter is LIVE!**\n\n"
-                f"**{stream['title']}**\n{stream['url']}"
-            )
-    elif not stream:
-        already_announced_stream_id = None
+    now = datetime.now(timezone.utc)
+
+    # Check for LIVE streams at :01 and :05
+    if now.minute in (1, 5):
+        stream = await check_live_stream()
+        if stream and stream['video_id'] != already_announced_stream_id:
+            already_announced_stream_id = stream['video_id']
+            channel = bot.get_channel(ANNOUNCEMENT_CHANNEL_ID)
+            if channel:
+                await channel.send(
+                    f"@everyone 🔴 **Scooter is LIVE NOW!**\n\n"
+                    f"**{stream['title']}**\n{stream['url']}"
+                )
+        elif not stream:
+            already_announced_stream_id = None
+
+    # Check for UPCOMING streams every minute (announces at 2hr, 1.5hr, 1hr, 30min, 0min)
+    upcoming = await check_upcoming_stream()
+    if upcoming and upcoming.get('scheduled_time'):
+        try:
+            scheduled_dt = datetime.fromisoformat(upcoming['scheduled_time'].replace('Z', '+00:00'))
+            diff = scheduled_dt - now
+            minutes_until = diff.total_seconds() / 60
+
+            # Only care about streams within 2 hours
+            if 0 < minutes_until <= 121:
+                # Announce at these minute marks (with a 1-min window to catch it)
+                announce_at = [120, 90, 60, 30, 5]
+                for mark in announce_at:
+                    if mark - 1 <= minutes_until <= mark + 1:
+                        # Build a unique key so we don't double-announce the same mark
+                        announce_key = f"{upcoming['video_id']}-{mark}"
+                        if announce_key == getattr(live_stream_checker, '_last_announce', None):
+                            break  # Already announced this one
+
+                        live_stream_checker._last_announce = announce_key
+
+                        channel = bot.get_channel(ANNOUNCEMENT_CHANNEL_ID)
+                        if channel:
+                            if mark >= 60:
+                                time_label = f"{mark // 60} hour{'s' if mark >= 120 else ''}"
+                            else:
+                                time_label = f"{mark} minutes"
+
+                            if mark == 5:
+                                time_label = "5 minutes"
+                                hype = "⏰🔥"
+                            elif mark == 30:
+                                hype = "⏰"
+                            elif mark == 60:
+                                hype = "📢"
+                            else:
+                                hype = "📅"
+
+                            embed = discord.Embed(
+                                title=f"{hype} Scooter goes LIVE in {time_label}!",
+                                color=discord.Color.gold(),
+                                timestamp=now
+                            )
+                            embed.add_field(name="Stream", value=upcoming['title'], inline=False)
+                            embed.add_field(
+                                name="Starts At",
+                                value=scheduled_dt.strftime("%I:%M %p UTC"),
+                                inline=True
+                            )
+                            embed.add_field(name="Link", value=upcoming['url'], inline=False)
+
+                            await channel.send(f"@everyone", embed=embed)
+                        break
+        except (ValueError, TypeError):
+            pass
 
 
 @live_stream_checker.before_loop
@@ -520,13 +623,48 @@ async def close(ctx):
 
 @bot.command()
 async def checklive(ctx):
-    """Check if Scooter is currently live on YouTube."""
+    """Check if Scooter is currently live or has a scheduled stream."""
     await ctx.send("🔍 Checking YouTube...")
+
+    # Check if currently live
     stream = await check_live_stream()
     if stream:
-        await ctx.send(f"🔴 **Scooter is LIVE!**\n{stream['title']}\n{stream['url']}")
+        await ctx.send(f"🔴 **Scooter is LIVE right now!**\n{stream['title']}\n{stream['url']}")
+        return
+
+    # Check for scheduled upcoming streams
+    upcoming = await check_upcoming_stream()
+    if upcoming:
+        # Format the scheduled time nicely
+        try:
+            scheduled_dt = datetime.fromisoformat(upcoming['scheduled_time'].replace('Z', '+00:00'))
+            time_str = scheduled_dt.strftime("%B %d, %Y at %I:%M %p UTC")
+            # Calculate how long until the stream
+            now = datetime.now(timezone.utc)
+            diff = scheduled_dt - now
+            if diff.total_seconds() > 0:
+                hours = int(diff.total_seconds() // 3600)
+                minutes = int((diff.total_seconds() % 3600) // 60)
+                countdown = f"⏰ Starting in **{hours}h {minutes}m**"
+            else:
+                countdown = "⏰ Should be starting any moment!"
+        except (ValueError, TypeError):
+            time_str = upcoming['scheduled_time']
+            countdown = ""
+
+        embed = discord.Embed(
+            title="📅 Upcoming Live Stream Scheduled!",
+            color=discord.Color.gold(),
+            timestamp=datetime.now(timezone.utc)
+        )
+        embed.add_field(name="Title", value=upcoming['title'], inline=False)
+        embed.add_field(name="Scheduled For", value=time_str, inline=True)
+        if countdown:
+            embed.add_field(name="Countdown", value=countdown, inline=True)
+        embed.add_field(name="Link", value=upcoming['url'], inline=False)
+        await ctx.send(embed=embed)
     else:
-        await ctx.send("Scooter is not live right now.")
+        await ctx.send("Scooter is not live and has no upcoming streams scheduled.")
 
 
 @bot.command()
