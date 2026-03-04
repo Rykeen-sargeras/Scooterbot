@@ -683,6 +683,104 @@ async def close(ctx):
 
 
 @bot.command()
+async def debugyt(ctx):
+    """Debug YouTube API. Mods/Admins/Scooter only."""
+    if not is_authorized(ctx):
+        await ctx.send("⛔ You don't have permission to use this command.")
+        return
+
+    await ctx.send(
+        f"🔧 **YouTube Debug Info**\n"
+        f"Channel ID: `{YOUTUBE_CHANNEL_ID}`\n"
+        f"API Key set: `{'✅ Yes' if YOUTUBE_API_KEY else '❌ NO — THIS IS THE PROBLEM'}`"
+    )
+    if not YOUTUBE_API_KEY:
+        return
+
+    uploads_playlist_id = 'UU' + YOUTUBE_CHANNEL_ID[2:]
+    await ctx.send(f"Uploads Playlist ID: `{uploads_playlist_id}`\nFetching last 10 videos...")
+
+    async with aiohttp.ClientSession() as session:
+        # Step 1: playlist items
+        async with session.get(
+            "https://www.googleapis.com/youtube/v3/playlistItems",
+            params={'part': 'snippet', 'playlistId': uploads_playlist_id, 'maxResults': 10, 'key': YOUTUBE_API_KEY}
+        ) as resp:
+            data = await resp.json()
+            if resp.status != 200:
+                await ctx.send(f"❌ Playlist API error `{resp.status}`:\n```{str(data)[:500]}```")
+                return
+            items = data.get('items', [])
+            await ctx.send(f"✅ Got {len(items)} videos from playlist.")
+            if not items:
+                await ctx.send("❌ No items in playlist — the channel ID or playlist ID may be wrong.")
+                return
+
+            video_ids = [item['snippet']['resourceId']['videoId'] for item in items]
+            await ctx.send(f"Video IDs: `{', '.join(video_ids)}`")
+
+        # Step 2: video details
+        async with session.get(
+            "https://www.googleapis.com/youtube/v3/videos",
+            params={'part': 'liveStreamingDetails,snippet', 'id': ','.join(video_ids), 'key': YOUTUBE_API_KEY}
+        ) as resp:
+            details_data = await resp.json()
+            if resp.status != 200:
+                await ctx.send(f"❌ Videos API error `{resp.status}`:\n```{str(details_data)[:500]}```")
+                return
+
+            found_any = False
+            for item in details_data.get('items', []):
+                live = item.get('liveStreamingDetails')
+                if live:
+                    found_any = True
+                    await ctx.send(
+                        f"📺 **{item['snippet']['title']}**\n"
+                        f"ID: `{item['id']}`\n"
+                        f"Scheduled Start: `{live.get('scheduledStartTime', 'N/A')}`\n"
+                        f"Actual Start:    `{live.get('actualStartTime', 'N/A')}`\n"
+                        f"Actual End:      `{live.get('actualEndTime', 'N/A')}`"
+                    )
+            if not found_any:
+                await ctx.send(
+                    "⚠️ No `liveStreamingDetails` found on any of the last 10 videos.\n"
+                    "This means the scheduled stream is either not in the last 10 uploads, "
+                    "or the YouTube API isn't returning it. Try `!debugvideo <video_id>` with the exact ID."
+                )
+
+@bot.command()
+async def debugvideo(ctx, video_id: str):
+    """Check liveStreamingDetails for a specific video ID. Mods/Admins/Scooter only."""
+    if not is_authorized(ctx):
+        await ctx.send("⛔ You don't have permission to use this command.")
+        return
+
+    await ctx.send(f"🔍 Looking up video `{video_id}`...")
+    async with aiohttp.ClientSession() as session:
+        async with session.get(
+            "https://www.googleapis.com/youtube/v3/videos",
+            params={'part': 'liveStreamingDetails,snippet', 'id': video_id, 'key': YOUTUBE_API_KEY}
+        ) as resp:
+            data = await resp.json()
+            if resp.status != 200:
+                await ctx.send(f"❌ API error `{resp.status}`:\n```{str(data)[:500]}```")
+                return
+            items = data.get('items', [])
+            if not items:
+                await ctx.send(f"❌ No video found with ID `{video_id}`. Check the ID is correct.")
+                return
+            item = items[0]
+            live = item.get('liveStreamingDetails', {})
+            await ctx.send(
+                f"✅ **{item['snippet']['title']}**\n"
+                f"Scheduled Start: `{live.get('scheduledStartTime', 'N/A')}`\n"
+                f"Actual Start:    `{live.get('actualStartTime', 'N/A')}`\n"
+                f"Actual End:      `{live.get('actualEndTime', 'N/A')}`\n"
+                f"Live Chat ID:    `{live.get('activeLiveChatId', 'N/A')}`"
+            )
+
+
+@bot.command()
 async def checklive(ctx):
     """Check if Scooter is currently live or has a scheduled stream."""
     await ctx.send("🔍 Checking YouTube...")
