@@ -11,8 +11,6 @@ from datetime import datetime, timezone, timedelta
 
 # EST timezone (UTC-5)
 EST = timezone(timedelta(hours=-5))
-# Central timezone (UTC-6)
-CST = timezone(timedelta(hours=-6))
 # CST timezone (UTC-6)
 CST = timezone(timedelta(hours=-6))
 
@@ -35,25 +33,30 @@ Thread(target=run_server, daemon=True).start()
 # ==========================================
 # CONFIGURATION
 # ==========================================
-BOT_TOKEN = os.getenv('BOT_TOKEN')
-GUILD_ID = int(os.getenv('GUILD_ID', 0))
-MOD_ROLE_ID = int(os.getenv('MOD_ROLE_ID', 0))
-ADMIN_ROLE_ID = int(os.getenv('ADMIN_ROLE_ID', 0))
-SCOOTER_ID = int(os.getenv('SCOOTER_ID', 0))
-LOG_CHANNEL_ID = int(os.getenv('LOG_CHANNEL_ID', 0))
-MOD_CHANNEL_ID = int(os.getenv('MOD_CHANNEL_ID', 0))
-YOUTUBE_API_KEY = os.getenv('YOUTUBE_API_KEY', '')
+BOT_TOKEN               = os.getenv('BOT_TOKEN')
+GUILD_ID                = int(os.getenv('GUILD_ID', 0))
+MOD_ROLE_ID             = int(os.getenv('MOD_ROLE_ID', 0))
+ADMIN_ROLE_ID           = int(os.getenv('ADMIN_ROLE_ID', 0))
+SCOOTER_ID              = int(os.getenv('SCOOTER_ID', 0))
+LOG_CHANNEL_ID          = int(os.getenv('LOG_CHANNEL_ID', 0))
+MOD_CHANNEL_ID          = int(os.getenv('MOD_CHANNEL_ID', 0))
+YOUTUBE_API_KEY         = os.getenv('YOUTUBE_API_KEY', '')
 ANNOUNCEMENT_CHANNEL_ID = int(os.getenv('ANNOUNCEMENT_CHANNEL_ID', 0))
-MAIN_CHAT_CHANNEL_ID = int(os.getenv('MAIN_CHAT_CHANNEL_ID', 0))
+MAIN_CHAT_CHANNEL_ID    = int(os.getenv('MAIN_CHAT_CHANNEL_ID', 0))
 
-YOUTUBE_CHANNEL_ID = 'UCxxxxxxxxxxxxxxxxxxxxxxxx'
-already_announced_stream_id = None
+# Scooter's YouTube channel ID
+YOUTUBE_CHANNEL_ID = os.getenv('YOUTUBE_CHANNEL_ID', 'UCJ0WxEUGSebWwgff9QbbzJA')
+
+# Stream announcement tracking
+already_announced_live_id = None        # track the current live stream we announced
+announced_upcoming_keys   = set()       # track which upcoming milestone keys we've announced
 
 # Ticket tracking
 ticket_counter = 0
 TICKET_COUNTER_FILE = '/tmp/ticket_counter.json'
 
-# Active DM sessions: user_id -> {step, reported_user, offense, proof, proof_images}
+# Active DM sessions
+# user_id -> { 'type': 'report'|'tech', 'step': ..., ... }
 dm_sessions = {}
 
 def load_ticket_counter():
@@ -87,7 +90,6 @@ def is_authorized(ctx):
     if any(role.id in (MOD_ROLE_ID, ADMIN_ROLE_ID) for role in ctx.author.roles):
         return True
     return False
-
 
 def is_staff_member(member):
     if member.id == SCOOTER_ID:
@@ -124,7 +126,6 @@ STREET_SUFFIXES = (
     r'court|circle|place|terrace|trail|'
     r'parkway|pkwy|highway|hwy|loop|pike|alley)'
 )
-
 STREET_ABBREVS = r'(?:st\.?|ave\.?|dr\.?|ln\.?|rd\.?|ct\.?|cir\.?|pl\.?|ter\.?|trl\.?|aly\.?)'
 
 US_STATES_ABBREV = (
@@ -132,7 +133,6 @@ US_STATES_ABBREV = (
     r'MA|MI|MN|MS|MO|MT|NE|NV|NH|NJ|NM|NY|NC|ND|OH|OK|OR|PA|RI|SC|SD|'
     r'TN|TX|UT|VT|VA|WA|WV|WI|WY)'
 )
-
 US_STATES_FULL = (
     r'(?:Alabama|Alaska|Arizona|Arkansas|California|Colorado|Connecticut|'
     r'Delaware|Florida|Georgia|Hawaii|Idaho|Illinois|Indiana|Iowa|Kansas|'
@@ -144,54 +144,43 @@ US_STATES_FULL = (
     r'West\s?Virginia|Wisconsin|Wyoming)'
 )
 
-
 def has_false_positive(text):
     lower = text.lower()
     return any(phrase in lower for phrase in FALSE_POSITIVE_PHRASES)
 
-
 def looks_like_address(text):
     check = text.strip()
-
     if has_false_positive(check):
         return None
 
-    # Full address: number + street + city + state (+ optional zip)
     full_address = re.compile(
         r'\b\d{1,6}\s+[A-Za-z\s]{2,25}\b(?:' + STREET_SUFFIXES + r'|' + STREET_ABBREVS + r')'
         r'\b[,.\s]+[A-Z][a-z]+(?:\s[A-Z][a-z]+)?[,.\s]+(?:' + US_STATES_ABBREV + r'|' + US_STATES_FULL + r')'
-        r'(?:\s+\d{5}(?:-\d{4})?)?\b',
-        re.IGNORECASE
+        r'(?:\s+\d{5}(?:-\d{4})?)?\b', re.IGNORECASE
     )
     match = full_address.search(check)
     if match and not has_false_positive(match.group()):
         return match.group()
 
-    # Street + zip code
     street_plus_zip = re.compile(
         r'\b\d{1,6}\s+[A-Za-z\s]{2,25}\b(?:' + STREET_SUFFIXES + r'|' + STREET_ABBREVS + r')'
-        r'\b[,.\s]*\d{5}(?:-\d{4})?\b',
-        re.IGNORECASE
+        r'\b[,.\s]*\d{5}(?:-\d{4})?\b', re.IGNORECASE
     )
     match = street_plus_zip.search(check)
     if match and not has_false_positive(match.group()):
         return match.group()
 
-    # Street + apartment/unit
     street_plus_unit = re.compile(
         r'\b\d{1,6}\s+[A-Za-z\s]{2,25}\b(?:' + STREET_SUFFIXES + r'|' + STREET_ABBREVS + r')'
-        r'\b[,.\s]*(?:apt|apartment|unit|suite|ste|#)\s*\w{1,6}\b',
-        re.IGNORECASE
+        r'\b[,.\s]*(?:apt|apartment|unit|suite|ste|#)\s*\w{1,6}\b', re.IGNORECASE
     )
     match = street_plus_unit.search(check)
     if match and not has_false_positive(match.group()):
         return match.group()
 
-    # PO Box + city/state
     po_box = re.compile(
         r'\bP\.?\s*O\.?\s*Box\s+\d+[,.\s]+[A-Z][a-z]+(?:\s[A-Z][a-z]+)?[,.\s]+(?:' + US_STATES_ABBREV + r'|' + US_STATES_FULL + r')'
-        r'(?:\s+\d{5}(?:-\d{4})?)?\b',
-        re.IGNORECASE
+        r'(?:\s+\d{5}(?:-\d{4})?)?\b', re.IGNORECASE
     )
     match = po_box.search(check)
     if match:
@@ -201,35 +190,19 @@ def looks_like_address(text):
 
 
 # ==========================================
-# YOUTUBE LIVE STREAM CHECKER
+# YOUTUBE HELPERS
 # ==========================================
-async def get_youtube_channel_id():
-    url = "https://www.googleapis.com/youtube/v3/search"
-    params = {'part': 'snippet', 'q': 'Scooter-13', 'type': 'channel', 'key': YOUTUBE_API_KEY}
-    async with aiohttp.ClientSession() as session:
-        async with session.get(url, params=params) as resp:
-            if resp.status == 200:
-                data = await resp.json()
-                if data.get('items'):
-                    return data['items'][0]['snippet']['channelId']
-    return None
-
-
 async def check_live_stream():
-    global YOUTUBE_CHANNEL_ID
+    """Returns stream info dict if currently live, else None."""
     if not YOUTUBE_API_KEY:
         return None
-    if YOUTUBE_CHANNEL_ID.startswith('UCx'):
-        resolved = await get_youtube_channel_id()
-        if resolved:
-            YOUTUBE_CHANNEL_ID = resolved
-        else:
-            return None
-
     url = "https://www.googleapis.com/youtube/v3/search"
     params = {
-        'part': 'snippet', 'channelId': YOUTUBE_CHANNEL_ID,
-        'eventType': 'live', 'type': 'video', 'key': YOUTUBE_API_KEY
+        'part': 'snippet',
+        'channelId': YOUTUBE_CHANNEL_ID,
+        'eventType': 'live',
+        'type': 'video',
+        'key': YOUTUBE_API_KEY
     }
     async with aiohttp.ClientSession() as session:
         async with session.get(url, params=params) as resp:
@@ -246,31 +219,27 @@ async def check_live_stream():
 
 
 async def check_upcoming_stream():
-    """Check if Scooter has a scheduled upcoming live stream."""
-    global YOUTUBE_CHANNEL_ID
+    """
+    Returns the next scheduled stream info dict, or None.
+    Uses the channel uploads playlist + liveStreamingDetails for reliability.
+    """
     if not YOUTUBE_API_KEY:
         return None
-    if not YOUTUBE_CHANNEL_ID or YOUTUBE_CHANNEL_ID.startswith('UCx'):
-        resolved = await get_youtube_channel_id()
-        if resolved:
-            YOUTUBE_CHANNEL_ID = resolved
-        else:
-            return None
 
-    # The uploads playlist ID is the channel ID with 'UC' replaced by 'UU'
-    # This is more reliable than using eventType='upcoming' in the Search API
+    # Uploads playlist = channel ID with UC -> UU
     uploads_playlist_id = 'UU' + YOUTUBE_CHANNEL_ID[2:]
 
     async with aiohttp.ClientSession() as session:
-        # Fetch recent videos from the uploads playlist
-        playlist_url = "https://www.googleapis.com/youtube/v3/playlistItems"
         playlist_params = {
             'part': 'snippet',
             'playlistId': uploads_playlist_id,
             'maxResults': 10,
             'key': YOUTUBE_API_KEY
         }
-        async with session.get(playlist_url, params=playlist_params) as resp:
+        async with session.get(
+            "https://www.googleapis.com/youtube/v3/playlistItems",
+            params=playlist_params
+        ) as resp:
             if resp.status != 200:
                 return None
             playlist_data = await resp.json()
@@ -278,138 +247,210 @@ async def check_upcoming_stream():
             if not items:
                 return None
 
-            # Check liveStreamingDetails for each video to find scheduled ones
             video_ids = [item['snippet']['resourceId']['videoId'] for item in items]
-            details_url = "https://www.googleapis.com/youtube/v3/videos"
-            details_params = {
-                'part': 'liveStreamingDetails,snippet',
-                'id': ','.join(video_ids),
-                'key': YOUTUBE_API_KEY
-            }
-            async with session.get(details_url, params=details_params) as details_resp:
-                if details_resp.status != 200:
-                    return None
-                details_data = await details_resp.json()
-                now = datetime.now(timezone.utc)
 
-                for item in details_data.get('items', []):
-                    live_details = item.get('liveStreamingDetails', {})
-                    scheduled_time = live_details.get('scheduledStartTime')
-                    actual_end = live_details.get('actualEndTime')
+        details_params = {
+            'part': 'liveStreamingDetails,snippet',
+            'id': ','.join(video_ids),
+            'key': YOUTUBE_API_KEY
+        }
+        async with session.get(
+            "https://www.googleapis.com/youtube/v3/videos",
+            params=details_params
+        ) as resp:
+            if resp.status != 200:
+                return None
+            details_data = await resp.json()
+            now = datetime.now(timezone.utc)
 
-                    # Must have a future scheduled time and not already ended
-                    if scheduled_time and not actual_end:
-                        try:
-                            scheduled_dt = datetime.fromisoformat(scheduled_time.replace('Z', '+00:00'))
-                            if scheduled_dt > now:
-                                return {
-                                    'video_id': item['id'],
-                                    'title': item['snippet']['title'],
-                                    'url': f"https://www.youtube.com/watch?v={item['id']}",
-                                    'scheduled_time': scheduled_time
-                                }
-                        except (ValueError, TypeError):
-                            continue
+            for item in details_data.get('items', []):
+                live_details = item.get('liveStreamingDetails', {})
+                scheduled_time = live_details.get('scheduledStartTime')
+                actual_end     = live_details.get('actualEndTime')
+                actual_start   = live_details.get('actualStartTime')
+
+                # Future scheduled stream that hasn't ended or started yet
+                if scheduled_time and not actual_end and not actual_start:
+                    try:
+                        scheduled_dt = datetime.fromisoformat(scheduled_time.replace('Z', '+00:00'))
+                        if scheduled_dt > now:
+                            return {
+                                'video_id': item['id'],
+                                'title': item['snippet']['title'],
+                                'url': f"https://www.youtube.com/watch?v={item['id']}",
+                                'scheduled_time': scheduled_time
+                            }
+                    except (ValueError, TypeError):
+                        continue
     return None
 
 
+# ==========================================
+# HOURLY STREAM CHECKER TASK
+# ==========================================
 @tasks.loop(minutes=1)
 async def live_stream_checker():
-    global already_announced_stream_id
+    global already_announced_live_id, announced_upcoming_keys
 
     now = datetime.now(timezone.utc)
 
-    # Check for LIVE streams every hour at :05
-    if now.minute == 5:
+    # --- Only run checks on the hour ---
+    if now.minute != 0:
+        # Still check upcoming every minute so we don't miss announce windows
+        pass
+    
+    # --- CHECK IF LIVE (on the hour) ---
+    if now.minute == 0:
         stream = await check_live_stream()
-        if stream and stream['video_id'] != already_announced_stream_id:
-            already_announced_stream_id = stream['video_id']
-            # LIVE NOW goes to ANNOUNCEMENT channel with @everyone
+        if stream and stream['video_id'] != already_announced_live_id:
+            already_announced_live_id = stream['video_id']
             channel = bot.get_channel(ANNOUNCEMENT_CHANNEL_ID)
             if channel:
-                live_msg = await channel.send(
-                    f"@everyone 🔴 **Scooter is LIVE NOW!**\n\n"
-                    f"**{stream['title']}**\n{stream['url']}"
-                )
-                # Publish to followers
                 try:
+                    live_msg = await channel.send(
+                        f"@everyone 🔴 **Scooter is LIVE NOW!**\n\n"
+                        f"**{stream['title']}**\n{stream['url']}"
+                    )
                     await live_msg.publish()
-                except Exception:
-                    pass
+                except Exception as e:
+                    print(f"Error sending live announcement: {e}")
         elif not stream:
-            already_announced_stream_id = None
+            already_announced_live_id = None
 
-    # Check for UPCOMING streams every minute (announces at 2hr, 1.5hr, 1hr, 30min, 5min)
+    # --- CHECK UPCOMING STREAM (every minute for announce windows) ---
     upcoming = await check_upcoming_stream()
-    if upcoming and upcoming.get('scheduled_time'):
-        try:
-            scheduled_dt = datetime.fromisoformat(upcoming['scheduled_time'].replace('Z', '+00:00'))
-            diff = scheduled_dt - now
-            minutes_until = diff.total_seconds() / 60
+    if not upcoming or not upcoming.get('scheduled_time'):
+        return
 
-            # Only care about streams within 2 hours
-            if 0 < minutes_until <= 121:
-                # Announce at these minute marks (with a 1-min window to catch it)
-                announce_at = [120, 90, 60, 30, 5]
-                for mark in announce_at:
-                    if mark - 1 <= minutes_until <= mark + 1:
-                        # Build a unique key so we don't double-announce the same mark
-                        announce_key = f"{upcoming['video_id']}-{mark}"
-                        if announce_key == getattr(live_stream_checker, '_last_announce', None):
-                            break  # Already announced this one
+    try:
+        scheduled_dt  = datetime.fromisoformat(upcoming['scheduled_time'].replace('Z', '+00:00'))
+        diff          = scheduled_dt - now
+        minutes_until = diff.total_seconds() / 60
+    except (ValueError, TypeError):
+        return
 
-                        live_stream_checker._last_announce = announce_key
+    # Announce at 2hr, 1hr, 30min, 5min before — no tag except go-live
+    announce_marks = [120, 60, 30, 5]
 
-                        # 2hr notice goes to ANNOUNCEMENT channel, rest go to MAIN CHAT
-                        if mark == 120:
-                            channel = bot.get_channel(ANNOUNCEMENT_CHANNEL_ID)
-                        else:
-                            channel = bot.get_channel(MAIN_CHAT_CHANNEL_ID)
+    for mark in announce_marks:
+        # 2-minute window so we don't miss due to timing drift
+        if mark - 2 <= minutes_until <= mark + 1:
+            announce_key = f"{upcoming['video_id']}-{mark}"
+            if announce_key in announced_upcoming_keys:
+                break  # already announced this one
 
-                        if channel:
-                            if mark >= 60:
-                                time_label = f"{mark // 60} hour{'s' if mark >= 120 else ''}"
-                            else:
-                                time_label = f"{mark} minutes"
+            announced_upcoming_keys.add(announce_key)
 
-                            if mark == 5:
-                                hype = "⏰🔥"
-                            elif mark == 30:
-                                hype = "⏰"
-                            elif mark == 60:
-                                hype = "📢"
-                            else:
-                                hype = "📅"
+            # All upcoming notices go to MAIN CHAT (no @everyone)
+            channel = bot.get_channel(MAIN_CHAT_CHANNEL_ID)
+            if not channel:
+                break
 
-                            embed = discord.Embed(
-                                title=f"{hype} Scooter goes LIVE in {time_label}!",
-                                color=discord.Color.gold(),
-                                timestamp=now
-                            )
-                            embed.add_field(name="Stream", value=upcoming['title'], inline=False)
-                            embed.add_field(
-                                name="Starts At",
-                                value=f"{scheduled_dt.astimezone(EST).strftime('%I:%M %p')} EST / {scheduled_dt.astimezone(CST).strftime('%I:%M %p')} CT",
-                                inline=True
-                            )
-                            embed.add_field(name="Link", value=upcoming['url'], inline=False)
+            if mark >= 60:
+                time_label = f"{mark // 60} hour{'s' if mark > 60 else ''}"
+            else:
+                time_label = f"{mark} minutes"
 
-                            sent_msg = await channel.send(embed=embed)
+            emoji = "📅" if mark == 120 else "📢" if mark == 60 else "⏰" if mark == 30 else "⏰🔥"
 
-                            # Publish the 2hr notice to followers
-                            if mark == 120:
-                                try:
-                                    await sent_msg.publish()
-                                except Exception:
-                                    pass
-                        break
-        except (ValueError, TypeError):
-            pass
+            embed = discord.Embed(
+                title=f"{emoji} Scooter goes LIVE in {time_label}!",
+                color=discord.Color.gold(),
+                timestamp=now
+            )
+            embed.add_field(name="Stream", value=upcoming['title'], inline=False)
+            embed.add_field(
+                name="Starts At",
+                value=(
+                    f"{scheduled_dt.astimezone(EST).strftime('%I:%M %p')} EST / "
+                    f"{scheduled_dt.astimezone(CST).strftime('%I:%M %p')} CT"
+                ),
+                inline=True
+            )
+            embed.add_field(name="Link", value=upcoming['url'], inline=False)
+
+            try:
+                await channel.send(embed=embed)
+            except Exception as e:
+                print(f"Error sending upcoming announcement: {e}")
+            break
 
 
 @live_stream_checker.before_loop
 async def before_live_check():
     await bot.wait_until_ready()
+
+
+# ==========================================
+# TICKET CHANNEL HELPER
+# ==========================================
+async def create_ticket_channel(guild, member, ticket_type, session):
+    global ticket_counter
+    ticket_counter += 1
+    save_ticket_counter()
+    ticket_number  = f"{ticket_counter:04d}"
+    prefix         = "tech" if ticket_type == "tech" else "report"
+    channel_name   = f"{prefix}-{ticket_number}"
+
+    mod_role   = guild.get_role(MOD_ROLE_ID)
+    admin_role = guild.get_role(ADMIN_ROLE_ID)
+    scooter    = guild.get_member(SCOOTER_ID)
+
+    overwrites = {
+        guild.default_role: discord.PermissionOverwrite(read_messages=False),
+        member: discord.PermissionOverwrite(read_messages=True, send_messages=True),
+    }
+    if mod_role:
+        overwrites[mod_role]   = discord.PermissionOverwrite(read_messages=True, send_messages=True)
+    if admin_role:
+        overwrites[admin_role] = discord.PermissionOverwrite(read_messages=True, send_messages=True)
+    if scooter:
+        overwrites[scooter]    = discord.PermissionOverwrite(read_messages=True, send_messages=True)
+
+    ticket_channel = await guild.create_text_channel(
+        name=channel_name,
+        overwrites=overwrites,
+        reason=f"{'Tech support' if ticket_type == 'tech' else 'Report'} ticket by {member.name}"
+    )
+
+    if ticket_type == "tech":
+        embed = discord.Embed(
+            title=f"🔧 Tech Ticket-{ticket_number}",
+            color=discord.Color.blue(),
+            timestamp=datetime.now(timezone.utc)
+        )
+        embed.set_author(
+            name=f"Tech Request by {member.display_name}",
+            icon_url=member.avatar.url if member.avatar else member.default_avatar.url
+        )
+        embed.add_field(name="📋 Issue Description", value=session['issue'], inline=False)
+        embed.add_field(name="📌 Status", value="🟡 Open", inline=True)
+        embed.set_footer(text=f"Submitted by {member.name} • ID: {member.id}")
+    else:
+        proof_text = session.get('proof') or 'No proof provided'
+        embed = discord.Embed(
+            title=f"📋 Report Ticket-{ticket_number}",
+            color=discord.Color.red(),
+            timestamp=datetime.now(timezone.utc)
+        )
+        embed.set_author(
+            name=f"Report by {member.display_name}",
+            icon_url=member.avatar.url if member.avatar else member.default_avatar.url
+        )
+        embed.add_field(name="👤 Reported User",  value=session['reported_user'], inline=True)
+        embed.add_field(name="📌 Status",          value="🟡 Open",               inline=True)
+        embed.add_field(name="⚠️ Offense",         value=session['offense'],      inline=False)
+        embed.add_field(name="🔗 Proof",           value=proof_text,              inline=False)
+        embed.set_footer(text=f"Reported by {member.name} • ID: {member.id}")
+
+    await ticket_channel.send(embed=embed)
+
+    # Attach proof images for reports
+    if ticket_type == "report" and session.get('proof_images'):
+        for img_url in session['proof_images']:
+            await ticket_channel.send(f"📎 **Attached proof:** {img_url}")
+
+    return ticket_channel, ticket_number
 
 
 # ==========================================
@@ -427,8 +468,6 @@ async def on_ready():
 
 @bot.event
 async def on_message(message):
-    global ticket_counter
-
     if message.author.bot:
         return
 
@@ -439,7 +478,7 @@ async def on_message(message):
         if not is_staff_member(message.author):
             detected = looks_like_address(message.content)
             if detected:
-                author = message.author
+                author  = message.author
                 channel = message.channel
                 content = message.content
 
@@ -460,173 +499,149 @@ async def on_message(message):
                         color=discord.Color.red(),
                         timestamp=datetime.now(timezone.utc)
                     )
-                    embed.add_field(name="User", value=f"{author.mention} ({author.name})", inline=True)
-                    embed.add_field(name="Channel", value=f"#{channel.name}", inline=True)
-                    embed.add_field(name="Action Taken", value="Message deleted + 12hr timeout", inline=True)
-                    embed.add_field(name="Detected Pattern", value=f"||{detected}||", inline=False)
-                    embed.add_field(name="Full Message", value=f"||{content[:500]}||", inline=False)
+                    embed.add_field(name="User",          value=f"{author.mention} ({author.name})", inline=True)
+                    embed.add_field(name="Channel",       value=f"#{channel.name}",                  inline=True)
+                    embed.add_field(name="Action Taken",  value="Message deleted + 12hr timeout",    inline=True)
+                    embed.add_field(name="Detected Pattern", value=f"||{detected}||",               inline=False)
+                    embed.add_field(name="Full Message",  value=f"||{content[:500]}||",              inline=False)
                     embed.set_footer(text="Address content hidden in spoiler tags for safety")
                     await mod_channel.send(embed=embed)
                 return
 
     # ==============================
-    # DM REPORT SYSTEM
+    # DM TICKET SYSTEM
     # ==============================
     if isinstance(message.channel, discord.DMChannel):
         guild = bot.get_guild(GUILD_ID)
         if guild is None:
-            print("Error: Cannot find guild.")
             return
 
         member = guild.get_member(message.author.id)
         if member is None:
-            await message.channel.send("You must be in the server to open a report.")
+            await message.channel.send("You must be in the server to open a ticket.")
             return
 
         user_id = message.author.id
+        text    = message.content.strip()
 
-        # --- ACTIVE SESSION: user is in the middle of a report ---
+        # Cancel anytime
+        if text.lower() == 'cancel' and user_id in dm_sessions:
+            del dm_sessions[user_id]
+            await message.channel.send("❌ Ticket cancelled. DM me again anytime to start a new one.")
+            return
+
+        # ---- ACTIVE SESSION ----
         if user_id in dm_sessions:
             session = dm_sessions[user_id]
-            step = session['step']
+            ticket_type = session['type']
+            step        = session['step']
 
-            # Cancel at any time
-            if message.content.strip().lower() == 'cancel':
-                del dm_sessions[user_id]
-                await message.channel.send("❌ Report cancelled. DM me again anytime to start a new one.")
-                return
+            # ===== TECH TICKET FLOW =====
+            if ticket_type == 'tech':
+                if step == 'awaiting_issue':
+                    session['issue'] = text
+                    await message.add_reaction('✅')
+                    await message.channel.send("✅ Got it. **Creating your tech ticket now...**")
 
-            # STEP 1: Who are you reporting?
-            if step == 'awaiting_username':
-                session['reported_user'] = message.content.strip()
-                session['step'] = 'awaiting_offense'
-                await message.add_reaction('✅')
-                await message.channel.send(
-                    "✅ Got it.\n\n"
-                    "**Step 2/3 — What did they do?**\n"
-                    "Describe the offense or rule they broke."
-                )
-                return
+                    ticket_channel, ticket_number = await create_ticket_channel(guild, member, 'tech', session)
+                    await message.channel.send(
+                        f"🔧 **Tech Ticket-{ticket_number}** has been created!\n"
+                        f"You can follow up in {ticket_channel.mention}\n"
+                        f"A staff member will assist you shortly."
+                    )
+                    del dm_sessions[user_id]
+                    return
 
-            # STEP 2: What did they do?
-            elif step == 'awaiting_offense':
-                session['offense'] = message.content.strip()
-                session['step'] = 'awaiting_proof'
-                await message.add_reaction('✅')
-                await message.channel.send(
-                    "✅ Got it.\n\n"
-                    "**Step 3/3 — Do you have proof?**\n"
-                    "Send a screenshot, image, link, or description.\n"
-                    "Type `none` if you don't have any."
-                )
-                return
+            # ===== REPORT TICKET FLOW =====
+            elif ticket_type == 'report':
+                if step == 'awaiting_username':
+                    session['reported_user'] = text
+                    session['step']          = 'awaiting_offense'
+                    await message.add_reaction('✅')
+                    await message.channel.send(
+                        "✅ Got it.\n\n"
+                        "**Step 2/3 — What did they do?**\n"
+                        "Describe the offense or rule they broke."
+                    )
+                    return
 
-            # STEP 3: Proof
-            elif step == 'awaiting_proof':
-                proof_text = message.content.strip() if message.content.strip().lower() != 'none' else 'No proof provided'
-                proof_images = [att.url for att in message.attachments] if message.attachments else []
-                session['proof'] = proof_text
-                session['proof_images'] = proof_images
+                elif step == 'awaiting_offense':
+                    session['offense'] = text
+                    session['step']    = 'awaiting_proof'
+                    await message.add_reaction('✅')
+                    await message.channel.send(
+                        "✅ Got it.\n\n"
+                        "**Step 3/3 — Do you have proof?**\n"
+                        "Send a screenshot, image, link, or description.\n"
+                        "Type `none` if you don't have any."
+                    )
+                    return
 
-                await message.add_reaction('✅')
-                await message.channel.send("✅ All info received. **Creating ticket now...**")
+                elif step == 'awaiting_proof':
+                    proof_text          = text if text.lower() != 'none' else 'No proof provided'
+                    proof_images        = [att.url for att in message.attachments] if message.attachments else []
+                    session['proof']        = proof_text
+                    session['proof_images'] = proof_images
 
-                # --- CREATE TICKET CHANNEL ---
-                ticket_counter += 1
-                save_ticket_counter()
-                ticket_number = f"{ticket_counter:04d}"
-                channel_name = f"ticket-{ticket_number}"
+                    await message.add_reaction('✅')
+                    await message.channel.send("✅ All info received. **Creating report ticket now...**")
 
-                mod_role = guild.get_role(MOD_ROLE_ID)
-                admin_role = guild.get_role(ADMIN_ROLE_ID)
-                scooter = guild.get_member(SCOOTER_ID)
+                    ticket_channel, ticket_number = await create_ticket_channel(guild, member, 'report', session)
+                    await message.channel.send(
+                        f"🎫 **Report Ticket-{ticket_number}** has been created!\n"
+                        f"You can follow up in {ticket_channel.mention}\n"
+                        f"A moderator will review your report shortly."
+                    )
+                    del dm_sessions[user_id]
+                    return
 
-                overwrites = {
-                    guild.default_role: discord.PermissionOverwrite(read_messages=False),
-                    member: discord.PermissionOverwrite(read_messages=True, send_messages=True),
-                }
-                if mod_role:
-                    overwrites[mod_role] = discord.PermissionOverwrite(read_messages=True, send_messages=True)
-                if admin_role:
-                    overwrites[admin_role] = discord.PermissionOverwrite(read_messages=True, send_messages=True)
-                if scooter:
-                    overwrites[scooter] = discord.PermissionOverwrite(read_messages=True, send_messages=True)
-
-                ticket_channel = await guild.create_text_channel(
-                    name=channel_name,
-                    overwrites=overwrites,
-                    reason=f"Report ticket by {message.author.name}"
-                )
-
-                # --- BUILD REPORT EMBED ---
-                embed = discord.Embed(
-                    title=f"📋 Ticket-{ticket_number}",
-                    color=discord.Color.red(),
-                    timestamp=datetime.now(timezone.utc)
-                )
-                embed.set_author(
-                    name=f"Report by {member.display_name}",
-                    icon_url=member.avatar.url if member.avatar else member.default_avatar.url
-                )
-                embed.add_field(
-                    name="👤 Reported User",
-                    value=session['reported_user'],
-                    inline=True
-                )
-                embed.add_field(
-                    name="📌 Status",
-                    value="🟡 Open",
-                    inline=True
-                )
-                embed.add_field(
-                    name="⚠️ Offense",
-                    value=session['offense'],
-                    inline=False
-                )
-                embed.add_field(
-                    name="🔗 Proof",
-                    value=proof_text,
-                    inline=False
-                )
-                embed.set_footer(text=f"Reported by {member.name} • ID: {member.id}")
-
-                await ticket_channel.send(embed=embed)
-
-                # Send proof images if attached
-                if proof_images:
-                    for img_url in proof_images:
-                        await ticket_channel.send(f"📎 **Attached proof:** {img_url}")
-
-                # Notify reporter
-                await message.channel.send(
-                    f"🎫 **Ticket-{ticket_number}** has been created!\n"
-                    f"You can follow up in {ticket_channel.mention}\n"
-                    f"A moderator will review your report shortly."
-                )
-
-                # Clean up session
-                del dm_sessions[user_id]
-                return
-
-        # --- NO ACTIVE SESSION: start a new report ---
+        # ---- NO ACTIVE SESSION: show ticket type menu ----
         else:
-            dm_sessions[user_id] = {
-                'step': 'awaiting_username',
-                'reported_user': None,
-                'offense': None,
-                'proof': None,
-                'proof_images': [],
-            }
+            dm_sessions[user_id] = {'type': None, 'step': 'awaiting_type'}
             await message.channel.send(
-                "📨 **ScooterBot Report System**\n\n"
-                "I'll walk you through filing a report.\n"
-                "You can type `cancel` at any time to stop.\n\n"
-                "**Step 1/3 — Who are you reporting?**\n"
-                "Enter the username or display name of the user."
+                "👋 **Welcome to ScooterBot Support!**\n\n"
+                "Please choose what kind of ticket you'd like to open:\n\n"
+                "🔧 Type **`tech`** — for technical issues or help\n"
+                "🚨 Type **`report`** — to report a member\n\n"
+                "You can type `cancel` at any time to stop."
             )
             return
 
-    # Let commands still work
+        # ---- Handle ticket type selection ----
+        if dm_sessions.get(user_id, {}).get('step') == 'awaiting_type':
+            if text.lower() == 'tech':
+                dm_sessions[user_id] = {
+                    'type': 'tech',
+                    'step': 'awaiting_issue',
+                    'issue': None
+                }
+                await message.channel.send(
+                    "🔧 **Tech Support Ticket**\n\n"
+                    "Please describe your technical issue in as much detail as possible.\n"
+                    "_(You can type `cancel` to stop at any time.)_"
+                )
+            elif text.lower() == 'report':
+                dm_sessions[user_id] = {
+                    'type': 'report',
+                    'step': 'awaiting_username',
+                    'reported_user': None,
+                    'offense': None,
+                    'proof': None,
+                    'proof_images': []
+                }
+                await message.channel.send(
+                    "🚨 **Member Report Ticket**\n\n"
+                    "I'll walk you through filing a report.\n"
+                    "_(You can type `cancel` to stop at any time.)_\n\n"
+                    "**Step 1/3 — Who are you reporting?**\n"
+                    "Enter the username or display name of the user."
+                )
+            else:
+                await message.channel.send(
+                    "Please type **`tech`** for a tech ticket or **`report`** to report a member."
+                )
+            return
+
     await bot.process_commands(message)
 
 
@@ -635,23 +650,21 @@ async def on_message(message):
 # ==========================================
 @bot.command()
 async def close(ctx):
-    """Close a ticket channel. Archives transcript to log channel."""
-    if ctx.channel.name.startswith("ticket-") or ctx.channel.name.startswith("report-"):
+    """Close a ticket channel and archive transcript to log channel."""
+    if ctx.channel.name.startswith("ticket-") or ctx.channel.name.startswith("report-") or ctx.channel.name.startswith("tech-"):
         await ctx.send("📁 Archiving ticket and closing channel...")
 
-        # Build transcript
-        transcript = f"--- Transcript for {ctx.channel.name} ---\n"
+        transcript  = f"--- Transcript for {ctx.channel.name} ---\n"
         transcript += f"--- Closed by {ctx.author.name} at {datetime.now(EST).strftime('%Y-%m-%d %H:%M:%S')} EST / {datetime.now(CST).strftime('%H:%M:%S')} CT ---\n\n"
         async for msg in ctx.channel.history(limit=None, oldest_first=True):
-            est_time = msg.created_at.replace(tzinfo=timezone.utc).astimezone(EST).strftime("%Y-%m-%d %H:%M:%S")
-            cst_time = msg.created_at.replace(tzinfo=timezone.utc).astimezone(CST).strftime("%H:%M:%S")
+            est_time       = msg.created_at.replace(tzinfo=timezone.utc).astimezone(EST).strftime("%Y-%m-%d %H:%M:%S")
+            cst_time       = msg.created_at.replace(tzinfo=timezone.utc).astimezone(CST).strftime("%H:%M:%S")
             time_formatted = f"{est_time} EST / {cst_time} CT"
-            content = msg.content if msg.content else "[embed or attachment]"
-            transcript += f"[{time_formatted}] {msg.author.name}: {content}\n"
+            content        = msg.content if msg.content else "[embed or attachment]"
+            transcript    += f"[{time_formatted}] {msg.author.name}: {content}\n"
 
         transcript_file = discord.File(io.StringIO(transcript), filename=f"{ctx.channel.name}-archive.txt")
 
-        # Send archive to log channel
         log_channel = bot.get_channel(LOG_CHANNEL_ID)
         if log_channel:
             archive_embed = discord.Embed(
@@ -660,11 +673,10 @@ async def close(ctx):
                 timestamp=datetime.now(timezone.utc)
             )
             archive_embed.add_field(name="Closed By", value=ctx.author.mention, inline=True)
-            archive_embed.add_field(name="Channel", value=ctx.channel.name, inline=True)
+            archive_embed.add_field(name="Channel",   value=ctx.channel.name,   inline=True)
             archive_embed.set_footer(text="Transcript attached below")
             await log_channel.send(embed=archive_embed, file=transcript_file)
 
-        # Delete the channel
         await ctx.channel.delete(reason=f"Ticket closed by {ctx.author.name}")
     else:
         await ctx.send("⚠️ This command can only be used inside a ticket channel.")
@@ -675,30 +687,29 @@ async def checklive(ctx):
     """Check if Scooter is currently live or has a scheduled stream."""
     await ctx.send("🔍 Checking YouTube...")
 
-    # Check if currently live
     stream = await check_live_stream()
     if stream:
         await ctx.send(f"🔴 **Scooter is LIVE right now!**\n{stream['title']}\n{stream['url']}")
         return
 
-    # Check for scheduled upcoming streams
     upcoming = await check_upcoming_stream()
     if upcoming:
-        # Format the scheduled time nicely
         try:
             scheduled_dt = datetime.fromisoformat(upcoming['scheduled_time'].replace('Z', '+00:00'))
-            time_str = f"{scheduled_dt.astimezone(EST).strftime('%B %d, %Y at %I:%M %p')} EST / {scheduled_dt.astimezone(CST).strftime('%I:%M %p')} CT"
-            # Calculate how long until the stream
-            now = datetime.now(timezone.utc)
+            time_str     = (
+                f"{scheduled_dt.astimezone(EST).strftime('%B %d, %Y at %I:%M %p')} EST / "
+                f"{scheduled_dt.astimezone(CST).strftime('%I:%M %p')} CT"
+            )
+            now  = datetime.now(timezone.utc)
             diff = scheduled_dt - now
             if diff.total_seconds() > 0:
-                hours = int(diff.total_seconds() // 3600)
-                minutes = int((diff.total_seconds() % 3600) // 60)
+                hours     = int(diff.total_seconds() // 3600)
+                minutes   = int((diff.total_seconds() % 3600) // 60)
                 countdown = f"⏰ Starting in **{hours}h {minutes}m**"
             else:
                 countdown = "⏰ Should be starting any moment!"
         except (ValueError, TypeError):
-            time_str = upcoming['scheduled_time']
+            time_str  = upcoming['scheduled_time']
             countdown = ""
 
         embed = discord.Embed(
@@ -706,8 +717,8 @@ async def checklive(ctx):
             color=discord.Color.gold(),
             timestamp=datetime.now(timezone.utc)
         )
-        embed.add_field(name="Title", value=upcoming['title'], inline=False)
-        embed.add_field(name="Scheduled For", value=time_str, inline=True)
+        embed.add_field(name="Title",         value=upcoming['title'], inline=False)
+        embed.add_field(name="Scheduled For", value=time_str,          inline=True)
         if countdown:
             embed.add_field(name="Countdown", value=countdown, inline=True)
         embed.add_field(name="Link", value=upcoming['url'], inline=False)
@@ -723,7 +734,7 @@ async def offline(ctx):
         await ctx.send("⛔ You don't have permission to use this command.")
         return
     await bot.change_presence(status=discord.Status.invisible)
-    await ctx.send("Bot is now in **offline** mode. (Powering down any issues contact Admin/Mods)")
+    await ctx.send("Bot is now in **offline** mode. (Powering down — any issues contact Admin/Mods)")
 
 
 @bot.command()
