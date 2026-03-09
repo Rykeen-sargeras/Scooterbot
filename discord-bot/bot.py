@@ -506,6 +506,7 @@ async def on_ready():
     load_ticket_counter()
     print(f'Logged in as {bot.user.name} and ready!')
     print(f'Ticket counter: {ticket_counter}')
+    print(f'Guilds: {[g.name for g in bot.guilds]}')
     if not live_stream_checker.is_running():
         live_stream_checker.start()
     print("All systems go.")
@@ -513,6 +514,7 @@ async def on_ready():
 
 @bot.event
 async def on_message(message):
+    print(f"[RAW] on_message fired: author={message.author} guild={message.guild} content={repr(message.content[:80])}")
     if message.author.bot:
         return
 
