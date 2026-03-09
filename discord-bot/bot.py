@@ -335,90 +335,93 @@ async def check_upcoming_stream():
 # ==========================================
 @tasks.loop(minutes=1)
 async def live_stream_checker():
-    global already_announced_live_id, announced_upcoming_keys
-
-    now = datetime.now(timezone.utc)
-
-    # --- Only run checks on the hour ---
-    if now.minute != 0:
-        # Still check upcoming every minute so we don't miss announce windows
-        pass
-    
-    # --- CHECK IF LIVE (on the hour) ---
-    if now.minute == 0:
-        stream = await check_live_stream()
-        if stream and stream['video_id'] != already_announced_live_id:
-            already_announced_live_id = stream['video_id']
-            channel = bot.get_channel(ANNOUNCEMENT_CHANNEL_ID)
-            if channel:
-                try:
-                    live_msg = await channel.send(
-                        f"@everyone 🔴 **Scooter is LIVE NOW!**\n\n"
-                        f"**{stream['title']}**\n{stream['url']}"
-                    )
-                    await live_msg.publish()
-                except Exception as e:
-                    print(f"Error sending live announcement: {e}")
-        elif not stream:
-            already_announced_live_id = None
-
-    # --- CHECK UPCOMING STREAM (every minute for announce windows) ---
-    upcoming = await check_upcoming_stream()
-    if not upcoming or not upcoming.get('scheduled_time'):
-        return
-
     try:
-        scheduled_dt  = datetime.fromisoformat(upcoming['scheduled_time'].replace('Z', '+00:00'))
-        diff          = scheduled_dt - now
-        minutes_until = diff.total_seconds() / 60
-    except (ValueError, TypeError):
-        return
+        global already_announced_live_id, announced_upcoming_keys
 
-    # Announce at 2hr, 1hr, 30min, 5min before — no tag except go-live
-    announce_marks = [120, 60, 30, 5]
+        now = datetime.now(timezone.utc)
 
-    for mark in announce_marks:
-        # 2-minute window so we don't miss due to timing drift
-        if mark - 2 <= minutes_until <= mark + 1:
-            announce_key = f"{upcoming['video_id']}-{mark}"
-            if announce_key in announced_upcoming_keys:
-                break  # already announced this one
+        # --- CHECK IF LIVE (on the hour) ---
+        if now.minute == 0:
+            try:
+                stream = await check_live_stream()
+                if stream and stream['video_id'] != already_announced_live_id:
+                    already_announced_live_id = stream['video_id']
+                    channel = bot.get_channel(ANNOUNCEMENT_CHANNEL_ID)
+                    if channel:
+                        live_msg = await channel.send(
+                            f"@everyone 🔴 **Scooter is LIVE NOW!**\n\n"
+                            f"**{stream['title']}**\n{stream['url']}"
+                        )
+                        try:
+                            await live_msg.publish()
+                        except Exception:
+                            pass
+                elif not stream:
+                    already_announced_live_id = None
+            except Exception as e:
+                print(f"[ERROR] Live stream check failed: {e}")
 
-            announced_upcoming_keys.add(announce_key)
+        # --- CHECK UPCOMING STREAM ---
+        try:
+            upcoming = await check_upcoming_stream()
+        except Exception as e:
+            print(f"[ERROR] Upcoming stream check failed: {e}")
+            return
 
-            # All upcoming notices go to MAIN CHAT (no @everyone)
-            channel = bot.get_channel(MAIN_CHAT_CHANNEL_ID)
-            if not channel:
+        if not upcoming or not upcoming.get('scheduled_time'):
+            return
+
+        try:
+            scheduled_dt  = datetime.fromisoformat(upcoming['scheduled_time'].replace('Z', '+00:00'))
+            diff          = scheduled_dt - now
+            minutes_until = diff.total_seconds() / 60
+        except (ValueError, TypeError):
+            return
+
+        announce_marks = [120, 60, 30, 5]
+
+        for mark in announce_marks:
+            if mark - 2 <= minutes_until <= mark + 1:
+                announce_key = f"{upcoming['video_id']}-{mark}"
+                if announce_key in announced_upcoming_keys:
+                    break
+
+                announced_upcoming_keys.add(announce_key)
+                channel = bot.get_channel(MAIN_CHAT_CHANNEL_ID)
+                if not channel:
+                    break
+
+                if mark >= 60:
+                    time_label = f"{mark // 60} hour{'s' if mark > 60 else ''}"
+                else:
+                    time_label = f"{mark} minutes"
+
+                emoji = "📅" if mark == 120 else "📢" if mark == 60 else "⏰" if mark == 30 else "⏰🔥"
+
+                embed = discord.Embed(
+                    title=f"{emoji} Scooter goes LIVE in {time_label}!",
+                    color=discord.Color.gold(),
+                    timestamp=now
+                )
+                embed.add_field(name="Stream", value=upcoming['title'], inline=False)
+                embed.add_field(
+                    name="Starts At",
+                    value=(
+                        f"{scheduled_dt.astimezone(EST).strftime('%I:%M %p')} EST / "
+                        f"{scheduled_dt.astimezone(CST).strftime('%I:%M %p')} CT"
+                    ),
+                    inline=True
+                )
+                embed.add_field(name="Link", value=upcoming['url'], inline=False)
+
+                try:
+                    await channel.send(embed=embed)
+                except Exception as e:
+                    print(f"[ERROR] Sending upcoming announcement failed: {e}")
                 break
 
-            if mark >= 60:
-                time_label = f"{mark // 60} hour{'s' if mark > 60 else ''}"
-            else:
-                time_label = f"{mark} minutes"
-
-            emoji = "📅" if mark == 120 else "📢" if mark == 60 else "⏰" if mark == 30 else "⏰🔥"
-
-            embed = discord.Embed(
-                title=f"{emoji} Scooter goes LIVE in {time_label}!",
-                color=discord.Color.gold(),
-                timestamp=now
-            )
-            embed.add_field(name="Stream", value=upcoming['title'], inline=False)
-            embed.add_field(
-                name="Starts At",
-                value=(
-                    f"{scheduled_dt.astimezone(EST).strftime('%I:%M %p')} EST / "
-                    f"{scheduled_dt.astimezone(CST).strftime('%I:%M %p')} CT"
-                ),
-                inline=True
-            )
-            embed.add_field(name="Link", value=upcoming['url'], inline=False)
-
-            try:
-                await channel.send(embed=embed)
-            except Exception as e:
-                print(f"Error sending upcoming announcement: {e}")
-            break
+    except Exception as e:
+        print(f"[ERROR] live_stream_checker crashed: {e}")
 
 
 @live_stream_checker.before_loop
