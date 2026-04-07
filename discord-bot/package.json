@@ -1,0 +1,28 @@
+{
+  "name": "discord-role-manager-bot",
+  "version": "1.0.0",
+  "description": "Discord bot for managing role permissions with HTML dashboard",
+  "main": "discord_bot.js",
+  "scripts": {
+    "start": "node discord_bot.js",
+    "dev": "nodemon discord_bot.js"
+  },
+  "keywords": [
+    "discord",
+    "bot",
+    "permissions",
+    "roles",
+    "dashboard"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "discord.js": "^14.14.1"
+  },
+  "devDependencies": {
+    "nodemon": "^3.0.2"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
